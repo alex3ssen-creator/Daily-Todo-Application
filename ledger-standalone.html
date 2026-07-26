@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Ledger</title>
+<link rel="icon" href="data:,">
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500;600&display=swap');
+  html, body, #root { height: 100%; margin: 0; }
+  body { background: #0B0E13; }
+</style>
+
+<!-- Firebase (modular SDK) — initializes auth + Firestore, exposes them on window.fb for the app below -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-app.js";
+  import {
+    getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged
+  } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-auth.js";
+  import {
+    getFirestore, doc, getDoc, setDoc, onSnapshot
+  } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyCy_iCyOmFFn6PJc_tQz_DPvWfEYpndOYY",
+    authDomain: "to-do-application-5fc56.firebaseapp.com",
+    projectId: "to-do-application-5fc56",
+    storageBucket: "to-do-application-5fc56.firebasestorage.app",
+    messagingSenderId: "714131412913",
+    appId: "1:714131412913:web:e8f47c852776e2c187cf90",
+    measurementId: "G-879FMB15L2"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db = getFirestore(app);
+  const provider = new GoogleAuthProvider();
+
+  window.fb = { auth, db, provider, signInWithPopup, signOut, onAuthStateChanged, doc, getDoc, setDoc, onSnapshot };
+  window.dispatchEvent(new Event("fb-ready"));
+</script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useCallback } = React;
+
+/* ---------- design tokens ---------- */
+const BG = "#14181F", SURFACE = "#1E2430", SURFACE2 = "#262E3D";
+const TEXT = "#E8E6DE", MUTED = "#8B93A3", BORDER = "#2E3646";
+const ACCENT = "#D4A24C", DANGER = "#C9705E";
+
+const CATEGORIES = [
+  { id: "health", label: "Health", color: "#6FA88A" },
+  { id: "selfhelp", label: "Self-help", color: "#B6764F" },
+  { id: "cleaning", label: "Cleaning", color: "#5C8DBF" },
+  { id: "home", label: "Home", color: "#9B7EC2" },
+  { id: "work", label: "Work", color: "#8C8566" },
+  { id: "learning", label: "Learning", color: "#4FA8AE" },
+];
+
+const DOC_COLLECTION = "trackers";
+
+/* ---------- helpers ---------- */
+const pad = (n) => String(n).padStart(2, "0");
+const dateKey = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const uid = (p) => `${p}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+const normalizeWeekdays = (w) => (w && w.length ? w : [0, 1, 2, 3, 4, 5, 6]);
+
+function hexToRgba(hex, alpha) {
+  const c = hex.replace("#", "");
+  const r = parseInt(c.slice(0, 2), 16), g = parseInt(c.slice(2, 4), 16), b = parseInt(c.slice(4, 6), 16);
+  return `rgba(${r},${g},${b},${alpha})`;
+}
+
+function buildRing(tasks) {
+  if (!tasks || tasks.length === 0) return { background: "#2A3140" };
+  const total = tasks.length;
+  let cum = 0;
+  const stops = [];
+  CATEGORIES.forEach((cat) => {
+    const inCat = tasks.filter((t) => t.category === cat.id);
+    if (inCat.length === 0) return;
+    const catAngle = (inCat.length / total) * 360;
+    const doneCount = inCat.filter((t) => t.done).length;
+    const doneAngle = catAngle * (doneCount / inCat.length);
+    const start = cum, mid = cum + doneAngle, end = cum + catAngle;
+    stops.push(`${cat.color} ${start}deg ${mid}deg`);
+    stops.push(`${hexToRgba(cat.color, 0.18)} ${mid}deg ${end}deg`);
+    cum = end;
+  });
+  return { background: `conic-gradient(${stops.join(", ")})` };
+}
+
+function migrate(raw) {
+  if (raw.tasks) return raw;
+  const tasks = (raw.recurringTasks || []).map((t) => ({ ...t, isDaily: true, done: false }));
+  const dailyLogs = {};
+  Object.entries(raw.dailyLogs || {}).forEach(([k, list]) => {
+    dailyLogs[k] = list.map((t) => ({ ...t, taskId: t.recurringId ?? t.taskId ?? null }));
+  });
+  return { tasks, dailyLogs };
+}
+
+function generateIfNeeded(data, key) {
+  if (data.dailyLogs[key]) return data;
+  const d = new Date(`${key}T00:00:00`);
+  const wd = d.getDay();
+  const tasks = data.tasks
+    .filter((t) => t.isDaily && t.weekdays.includes(wd))
+    .map((t) => ({ id: uid("t"), name: t.name, category: t.category, done: false, taskId: t.id }));
+  return { ...data, dailyLogs: { ...data.dailyLogs, [key]: tasks } };
+}
+
+function getMonthGrid(year, month) {
+  const first = new Date(year, month, 1);
+  const startWeekday = first.getDay();
+  const numDays = new Date(year, month + 1, 0).getDate();
+  const cells = [];
+  for (let i = 0; i < startWeekday; i++) cells.push(null);
+  for (let d = 1; d <= numDays; d++) cells.push(new Date(year, month, d));
+  return cells;
+}
+
+function computeStreak(dailyLogs, todayKey) {
+  let count = 0;
+  const cursor = new Date(`${todayKey}T00:00:00`);
+  while (true) {
+    const key = dateKey(cursor);
+    const tasks = dailyLogs[key];
+    if (!tasks || tasks.length === 0 || !tasks.some((t) => t.done)) break;
+    count++;
+    cursor.setDate(cursor.getDate() - 1);
+  }
+  return count;
+}
+
+function whenFirebaseReady(cb) {
+  if (window.fb) cb(window.fb);
+  else window.addEventListener("fb-ready", () => cb(window.fb), { once: true });
+}
+
+/* ---------- small components ---------- */
+function RingProgress({ tasks, size = 96, thickness = 10, showPercent = true }) {
+  const total = tasks ? tasks.length : 0;
+  const done = tasks ? tasks.filter((t) => t.done).length : 0;
+  const pct = total ? Math.round((done / total) * 100) : null;
+  const style = buildRing(tasks);
+  return (
+    <div style={{ position: "relative", width: size, height: size, borderRadius: "50%", flexShrink: 0, ...style }}>
+      <div style={{ position: "absolute", inset: thickness, borderRadius: "50%", background: BG, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        {showPercent && (
+          <span style={{ fontFamily: '"IBM Plex Mono", monospace', fontSize: size * 0.22, color: TEXT, fontWeight: 600 }}>
+            {pct === null ? "–" : `${pct}%`}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Toggle({ on, onClick }) {
+  return (
+    <button onClick={onClick} style={{ width: 40, height: 22, borderRadius: 11, background: on ? ACCENT : BORDER, position: "relative", flexShrink: 0 }}>
+      <span style={{ position: "absolute", top: 2, left: on ? 20 : 2, width: 18, height: 18, borderRadius: "50%", background: on ? BG : MUTED, transition: "left 0.15s" }} />
+    </button>
+  );
+}
+
+function EmptyState({ message, cta, onClick }) {
+  return (
+    <div className="text-center py-10">
+      <div style={{ color: MUTED, fontSize: 14, marginBottom: 16 }}>{message}</div>
+      <button onClick={onClick} className="px-5 py-2.5 rounded-xl" style={{ background: ACCENT, color: BG, fontSize: 13, fontWeight: 600 }}>{cta}</button>
+    </div>
+  );
+}
+
+function TaskRow({ task, onToggle, onRemove }) {
+  return (
+    <div className="flex items-center gap-3 py-2 px-3 rounded-xl" style={{ background: SURFACE2 }}>
+      <button onClick={onToggle} style={{
+        width: 22, height: 22, borderRadius: 6, flexShrink: 0,
+        border: `2px solid ${task.done ? ACCENT : BORDER}`,
+        background: task.done ? ACCENT : "transparent",
+        display: "flex", alignItems: "center", justifyContent: "center",
+      }}>
+        {task.done && <span style={{ color: BG, fontSize: 13, fontWeight: 700 }}>✓</span>}
+      </button>
+      <span style={{ flex: 1, fontSize: 14, textDecoration: task.done ? "line-through" : "none", color: task.done ? MUTED : TEXT }}>{task.name}</span>
+      <button onClick={onRemove} style={{ color: MUTED, fontSize: 16, lineHeight: 1 }}>×</button>
+    </div>
+  );
+}
+
+function BottomNav({ view, setView }) {
+  const items = [
+    { id: "today", label: "Today", icon: "☰" },
+    { id: "calendar", label: "Calendar", icon: "▦" },
+    { id: "manage", label: "Tasks", icon: "⚙" },
+  ];
+  return (
+    <div className="w-full flex" style={{ background: SURFACE, borderTop: `1px solid ${BORDER}` }}>
+      {items.map(({ id, label, icon }) => (
+        <button key={id} onClick={() => setView(id)} className="flex-1 flex flex-col items-center gap-1 py-3">
+          <span style={{ fontSize: 18, color: view === id ? ACCENT : MUTED }}>{icon}</span>
+          <span style={{ fontSize: 11, color: view === id ? ACCENT : MUTED }}>{label}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function GoogleGIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 48 48">
+      <path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.9 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.6 6.1 29.6 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.7-.4-3.5z"/>
+      <path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.6 15.9 18.9 13 24 13c3.1 0 5.9 1.2 8 3.1l5.7-5.7C34.6 6.1 29.6 4 24 4c-7.6 0-14.2 4.3-17.7 10.7z"/>
+      <path fill="#4CAF50" d="M24 44c5.5 0 10.4-1.9 14.2-5.1l-6.6-5.4C29.6 35.4 26.9 36 24 36c-5.3 0-9.7-3.1-11.3-7.5l-6.5 5C9.7 39.6 16.3 44 24 44z"/>
+      <path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.1-4.1 5.5l6.6 5.4C41.4 35.8 44 30.4 44 24c0-1.3-.1-2.7-.4-3.5z"/>
+    </svg>
+  );
+}
+
+function SignInScreen({ onSignIn, error }) {
+  return (
+    <div className="flex-1 flex flex-col items-center justify-center px-8 text-center">
+      <div style={{ fontFamily: "Fraunces, serif", fontSize: 30, fontWeight: 600 }}>Ledger</div>
+      <div style={{ color: MUTED, fontSize: 14, marginTop: 8, marginBottom: 28 }}>Sign in to sync your tasks across devices.</div>
+      <button onClick={onSignIn} className="px-5 py-3 rounded-xl flex items-center gap-3" style={{ background: SURFACE2, border: `1px solid ${BORDER}`, color: TEXT, fontSize: 14 }}>
+        <GoogleGIcon /> Sign in with Google
+      </button>
+      {error && <div style={{ color: DANGER, fontSize: 12, marginTop: 16 }}>{error}</div>}
+    </div>
+  );
+}
+
+function AccountBar({ user, onSignOut }) {
+  return (
+    <div className="flex items-center justify-between px-5 py-3" style={{ borderBottom: `1px solid ${BORDER}` }}>
+      <div className="flex items-center gap-2 min-w-0">
+        {user.photoURL && <img src={user.photoURL} referrerPolicy="no-referrer" style={{ width: 24, height: 24, borderRadius: "50%", flexShrink: 0 }} />}
+        <span style={{ fontSize: 13, color: MUTED, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+          {user.displayName || user.email}
+        </span>
+      </div>
+      <button onClick={onSignOut} style={{ fontSize: 12, color: MUTED, flexShrink: 0 }}>Sign out</button>
+    </div>
+  );
+}
+
+/* ---------- views ---------- */
+function TodayView({ data, todayKey, onToggle, onRemove, onOpenAdd }) {
+  const tasks = data.dailyLogs[todayKey] || [];
+  const streak = computeStreak(data.dailyLogs, todayKey);
+  const activeCats = CATEGORIES.filter((cat) => tasks.some((t) => t.category === cat.id));
+  return (
+    <div className="px-5 pt-6 pb-8">
+      <div className="flex items-center justify-between mb-1">
+        <div>
+          <div style={{ fontFamily: "Fraunces, serif", fontSize: 26, fontWeight: 600 }}>Today</div>
+          <div style={{ color: MUTED, fontSize: 13 }}>{new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}</div>
+        </div>
+        <RingProgress tasks={tasks} size={72} thickness={8} />
+      </div>
+      {streak > 1 && <div style={{ color: ACCENT, fontSize: 12, marginTop: 4 }}>{streak}-day streak</div>}
+      {tasks.length === 0 ? (
+        <div className="mt-4">
+          <EmptyState message="Nothing marked Daily yet. Add a task, or flip one in Tasks to Daily." cta="Add a task" onClick={() => onOpenAdd()} />
+        </div>
+      ) : (
+        <div className="mt-5 space-y-5">
+          {activeCats.map((cat) => (
+            <div key={cat.id}>
+              <div className="flex items-center gap-2 mb-2">
+                <span style={{ width: 8, height: 8, borderRadius: "50%", background: cat.color }} />
+                <span style={{ fontSize: 11, color: MUTED, letterSpacing: 0.5, textTransform: "uppercase" }}>{cat.label}</span>
+              </div>
+              <div className="space-y-2">
+                {tasks.filter((t) => t.category === cat.id).map((t) => (
+                  <TaskRow key={t.id} task={t} onToggle={() => onToggle(t.id)} onRemove={() => onRemove(t.id)} />
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {tasks.length > 0 && (
+        <button onClick={() => onOpenAdd()} className="mt-6 w-full py-3 rounded-xl flex items-center justify-center gap-2" style={{ background: SURFACE, border: `1px solid ${BORDER}`, color: TEXT }}>
+          + Add a task
+        </button>
+      )}
+    </div>
+  );
+}
+
+function CalendarView({ data, monthDate, setMonthDate, onOpenDay }) {
+  const year = monthDate.getFullYear(), month = monthDate.getMonth();
+  const cells = getMonthGrid(year, month);
+  const todayKey = dateKey(new Date());
+  return (
+    <div className="px-5 pt-6 pb-8">
+      <div className="flex items-center justify-between mb-5">
+        <button onClick={() => setMonthDate(new Date(year, month - 1, 1))} style={{ color: MUTED, fontSize: 20 }}>‹</button>
+        <div style={{ fontFamily: "Fraunces, serif", fontSize: 19, fontWeight: 600 }}>{monthDate.toLocaleDateString("en-US", { month: "long", year: "numeric" })}</div>
+        <button onClick={() => setMonthDate(new Date(year, month + 1, 1))} style={{ color: MUTED, fontSize: 20 }}>›</button>
+      </div>
+      <div className="grid grid-cols-7 mb-2">
+        {["S", "M", "T", "W", "T", "F", "S"].map((d, i) => (<div key={i} className="text-center" style={{ fontSize: 11, color: MUTED }}>{d}</div>))}
+      </div>
+      <div className="grid grid-cols-7 gap-y-3">
+        {cells.map((d, i) => {
+          if (!d) return <div key={i} />;
+          const key = dateKey(d);
+          const tasks = data.dailyLogs[key];
+          const isToday = key === todayKey;
+          return (
+            <button key={i} onClick={() => onOpenDay(key)} className="flex items-center justify-center">
+              <div style={{ position: "relative", width: 36, height: 36 }}>
+                <RingProgress tasks={tasks} size={36} thickness={4} showPercent={false} />
+                <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: isToday ? ACCENT : TEXT, fontWeight: isToday ? 700 : 400 }}>
+                  {d.getDate()}
+                </div>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function TaskManageRow({ task, onEdit, onToggleDaily, onToggleDone }) {
+  const cat = CATEGORIES.find((c) => c.id === task.category);
+  const days = task.weekdays.length === 7 ? "Every day" : task.weekdays.map((i) => ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"][i]).join(" ");
+  return (
+    <div className="flex items-center gap-2 py-2.5 px-3 rounded-xl" style={{ background: SURFACE }}>
+      {task.isDaily ? (
+        <span style={{ width: 22, flexShrink: 0 }} />
+      ) : (
+        <button onClick={onToggleDone} style={{
+          width: 22, height: 22, borderRadius: 6, flexShrink: 0,
+          border: `2px solid ${task.done ? ACCENT : BORDER}`,
+          background: task.done ? ACCENT : "transparent",
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+          {task.done && <span style={{ color: BG, fontSize: 13, fontWeight: 700 }}>✓</span>}
+        </button>
+      )}
+      <div className="flex-1 min-w-0">
+        <div style={{ fontSize: 14, textDecoration: task.done && !task.isDaily ? "line-through" : "none", color: task.done && !task.isDaily ? MUTED : TEXT }}>
+          {task.name}
+        </div>
+        <div style={{ fontSize: 11, color: MUTED }}>
+          {cat?.label}{task.isDaily ? ` · ${days}` : ""}
+        </div>
+      </div>
+      <div className="flex flex-col items-center gap-0.5" style={{ flexShrink: 0 }}>
+        <Toggle on={task.isDaily} onClick={onToggleDaily} />
+        <span style={{ fontSize: 9, color: MUTED }}>Daily</span>
+      </div>
+      <button onClick={onEdit} style={{ color: MUTED, flexShrink: 0, fontSize: 14 }}>✎</button>
+    </div>
+  );
+}
+
+function ManageView({ tasks, onAddClick, onEditClick, onToggleDaily, onToggleDone }) {
+  const dailyTasks = tasks.filter((t) => t.isDaily);
+  const longTermTasks = tasks.filter((t) => !t.isDaily);
+  return (
+    <div className="px-5 pt-6 pb-8">
+      <div style={{ fontFamily: "Fraunces, serif", fontSize: 26, fontWeight: 600 }} className="mb-1">Tasks</div>
+      <div style={{ color: MUTED, fontSize: 13 }} className="mb-5">Every task starts as a long-term to-do. Flip Daily to have it show up each day.</div>
+      {tasks.length === 0 ? (
+        <EmptyState message="No tasks yet." cta="Add one" onClick={onAddClick} />
+      ) : (
+        <>
+          {dailyTasks.length > 0 && (
+            <div className="mb-5">
+              <div style={{ fontSize: 11, color: MUTED, letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 8 }}>Daily</div>
+              <div className="space-y-2">
+                {dailyTasks.map((t) => (
+                  <TaskManageRow key={t.id} task={t} onEdit={() => onEditClick(t)} onToggleDaily={() => onToggleDaily(t.id)} onToggleDone={() => onToggleDone(t.id)} />
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="mb-5">
+            <div style={{ fontSize: 11, color: MUTED, letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 8 }}>Long-term</div>
+            {longTermTasks.length === 0 ? (
+              <div style={{ color: MUTED, fontSize: 13 }}>Nothing here right now.</div>
+            ) : (
+              <div className="space-y-2">
+                {longTermTasks.map((t) => (
+                  <TaskManageRow key={t.id} task={t} onEdit={() => onEditClick(t)} onToggleDaily={() => onToggleDaily(t.id)} onToggleDone={() => onToggleDone(t.id)} />
+                ))}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+      <button onClick={onAddClick} className="w-full py-3 rounded-xl flex items-center justify-center gap-2" style={{ background: SURFACE, border: `1px solid ${BORDER}`, color: TEXT }}>
+        + Add task
+      </button>
+    </div>
+  );
+}
+
+function DayDetailSheet({ dateKeyStr, data, onClose, onToggle, onRemove, onOpenAdd, onGenerate }) {
+  const tasks = data.dailyLogs[dateKeyStr];
+  const d = new Date(`${dateKeyStr}T00:00:00`);
+  const activeCats = tasks ? CATEGORIES.filter((cat) => tasks.some((t) => t.category === cat.id)) : [];
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center" style={{ background: "rgba(0,0,0,0.55)" }} onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} className="w-full rounded-t-3xl p-5" style={{ maxWidth: 430, background: SURFACE, maxHeight: "82vh", overflowY: "auto" }}>
+        <div className="flex justify-between items-start mb-4">
+          <div style={{ fontFamily: "Fraunces, serif", fontSize: 19, fontWeight: 600 }}>{d.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}</div>
+          <button onClick={onClose} style={{ color: MUTED, fontSize: 18 }}>×</button>
+        </div>
+        {!tasks ? (
+          <div className="text-center py-8">
+            <div style={{ color: MUTED, fontSize: 13, marginBottom: 16 }}>No tasks logged for this day.</div>
+            <button onClick={onGenerate} className="px-4 py-2 rounded-xl" style={{ background: ACCENT, color: BG, fontSize: 13, fontWeight: 600 }}>Log tasks for this day</button>
+          </div>
+        ) : (
+          <>
+            <div className="flex justify-center mb-5"><RingProgress tasks={tasks} size={88} thickness={9} /></div>
+            {activeCats.length > 0 && (
+              <div className="space-y-3 mb-5">
+                {activeCats.map((cat) => {
+                  const inCat = tasks.filter((t) => t.category === cat.id);
+                  const done = inCat.filter((t) => t.done).length;
+                  const pct = Math.round((done / inCat.length) * 100);
+                  return (
+                    <div key={cat.id}>
+                      <div className="flex justify-between mb-1" style={{ fontSize: 12, color: MUTED }}>
+                        <span>{cat.label}</span><span>{done}/{inCat.length}</span>
+                      </div>
+                      <div style={{ height: 6, borderRadius: 3, background: BORDER, overflow: "hidden" }}>
+                        <div style={{ height: "100%", width: `${pct}%`, background: cat.color }} />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            <div className="space-y-2 mb-4">
+              {tasks.map((t) => (<TaskRow key={t.id} task={t} onToggle={() => onToggle(t.id)} onRemove={() => onRemove(t.id)} />))}
+            </div>
+            <button onClick={onOpenAdd} className="w-full py-3 rounded-xl flex items-center justify-center gap-2" style={{ background: SURFACE2, color: TEXT }}>+ Add task for this day</button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TaskFormSheet({ sheet, onCancel, onSubmitTask, onSubmitOneOff, onDelete }) {
+  const isDayAdd = sheet.context === "day-add";
+  const isEdit = sheet.context === "edit";
+  const initial = sheet.initial || { name: "", category: CATEGORIES[0].id, isDaily: false, weekdays: [0, 1, 2, 3, 4, 5, 6] };
+  const [name, setName] = useState(initial.name);
+  const [category, setCategory] = useState(initial.category);
+  const [isDaily, setIsDaily] = useState(initial.isDaily ?? false);
+  const [weekdays, setWeekdays] = useState(initial.weekdays ?? [0, 1, 2, 3, 4, 5, 6]);
+
+  const toggleWeekday = (i) => setWeekdays((w) => (w.includes(i) ? w.filter((x) => x !== i) : [...w, i].sort()));
+
+  const submit = () => {
+    if (!name.trim()) return;
+    if (isDayAdd) onSubmitOneOff({ name: name.trim(), category });
+    else onSubmitTask({ name: name.trim(), category, isDaily, weekdays: normalizeWeekdays(weekdays) }, isEdit ? initial.id : null);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center" style={{ background: "rgba(0,0,0,0.55)" }} onClick={onCancel}>
+      <div onClick={(e) => e.stopPropagation()} className="w-full rounded-t-3xl p-5" style={{ maxWidth: 430, background: SURFACE }}>
+        <div className="flex justify-between items-center mb-4">
+          <div style={{ fontFamily: "Fraunces, serif", fontSize: 18, fontWeight: 600 }}>{isEdit ? "Edit task" : isDayAdd ? "Add task for this day" : "Add a task"}</div>
+          <button onClick={onCancel} style={{ color: MUTED, fontSize: 18 }}>×</button>
+        </div>
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Task name" className="w-full px-4 py-3 rounded-xl mb-4" style={{ background: SURFACE2, color: TEXT, border: `1px solid ${BORDER}`, fontSize: 14 }} />
+        <div className="flex flex-wrap gap-2 mb-4">
+          {CATEGORIES.map((cat) => (
+            <button key={cat.id} onClick={() => setCategory(cat.id)} className="px-3 py-2 rounded-full flex items-center gap-2" style={{ border: `1.5px solid ${category === cat.id ? cat.color : BORDER}`, background: category === cat.id ? hexToRgba(cat.color, 0.15) : "transparent" }}>
+              <span style={{ width: 8, height: 8, borderRadius: "50%", background: cat.color }} />
+              <span style={{ fontSize: 12, color: TEXT }}>{cat.label}</span>
+            </button>
+          ))}
+        </div>
+        {!isDayAdd && (
+          <>
+            <div className="flex items-center justify-between mb-4 px-1">
+              <div>
+                <div style={{ fontSize: 14 }}>Daily</div>
+                <div style={{ fontSize: 11, color: MUTED }}>Show this in Today's checklist</div>
+              </div>
+              <Toggle on={isDaily} onClick={() => setIsDaily((v) => !v)} />
+            </div>
+            {isDaily && (
+              <div className="mb-5">
+                <div style={{ fontSize: 12, color: MUTED, marginBottom: 8 }}>Repeats on</div>
+                <div className="flex gap-2">
+                  {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map((d, i) => (
+                    <button key={i} onClick={() => toggleWeekday(i)} style={{ width: 34, height: 34, borderRadius: "50%", fontSize: 11, background: weekdays.includes(i) ? ACCENT : "transparent", color: weekdays.includes(i) ? BG : MUTED, border: `1px solid ${weekdays.includes(i) ? ACCENT : BORDER}` }}>
+                      {d}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+        <button onClick={submit} className="w-full py-3 rounded-xl mb-2" style={{ background: ACCENT, color: BG, fontWeight: 600, fontSize: 14 }}>{isEdit ? "Save changes" : "Add task"}</button>
+        {isEdit && (
+          <button onClick={() => onDelete(initial.id)} className="w-full py-3 rounded-xl flex items-center justify-center gap-2" style={{ color: DANGER, fontSize: 13 }}>
+            🗑 Delete task
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ---------- app ---------- */
+function App() {
+  const [fb, setFb] = useState(null);
+  const [authUser, setAuthUser] = useState(undefined); // undefined = checking, null = signed out, object = signed in
+  const [authError, setAuthError] = useState(null);
+  const [data, setData] = useState({ tasks: [], dailyLogs: {} });
+  const [loaded, setLoaded] = useState(false);
+  const [view, setView] = useState("today");
+  const [monthDate, setMonthDate] = useState(new Date());
+  const [detailDateKey, setDetailDateKey] = useState(null);
+  const [sheet, setSheet] = useState(null);
+
+  const todayKey = dateKey(new Date());
+
+  // 1. wait for firebase to init, then track auth state
+  useEffect(() => {
+    let unsub = () => {};
+    whenFirebaseReady((fbApi) => {
+      setFb(fbApi);
+      unsub = fbApi.onAuthStateChanged(fbApi.auth, (user) => setAuthUser(user || null));
+    });
+    return () => unsub();
+  }, []);
+
+  // 2. once signed in, subscribe live to this user's document in Firestore
+  useEffect(() => {
+    if (!fb || !authUser) return;
+    setLoaded(false);
+    const ref = fb.doc(fb.db, DOC_COLLECTION, authUser.uid);
+    const unsub = fb.onSnapshot(
+      ref,
+      async (snap) => {
+        let raw = { tasks: [], dailyLogs: {} };
+        const existingRaw = snap.exists() ? snap.data().data : null;
+        if (existingRaw) {
+          try { raw = JSON.parse(existingRaw); } catch (e) { /* corrupt — start fresh */ }
+        }
+        const migrated = migrate(raw);
+        const withToday = generateIfNeeded(migrated, dateKey(new Date()));
+        setData(withToday);
+        setLoaded(true);
+        const serialized = JSON.stringify(withToday);
+        if (serialized !== existingRaw) {
+          try { await fb.setDoc(ref, { data: serialized, updatedAt: Date.now() }); } catch (e) { console.error("Sync failed", e); }
+        }
+      },
+      (err) => { console.error("Snapshot error", err); setLoaded(true); }
+    );
+    return () => unsub();
+  }, [fb, authUser]);
+
+  const mutate = useCallback((updater) => {
+    setData((prev) => {
+      const next = updater(prev);
+      if (fb && authUser) {
+        const ref = fb.doc(fb.db, DOC_COLLECTION, authUser.uid);
+        fb.setDoc(ref, { data: JSON.stringify(next), updatedAt: Date.now() }).catch((e) => console.error("Save failed", e));
+      }
+      return next;
+    });
+  }, [fb, authUser]);
+
+  const handleSignIn = async () => {
+    setAuthError(null);
+    try { await fb.signInWithPopup(fb.auth, fb.provider); }
+    catch (e) { setAuthError("Sign-in failed. Please try again."); console.error(e); }
+  };
+  const handleSignOut = () => { fb.signOut(fb.auth); setData({ tasks: [], dailyLogs: {} }); setLoaded(false); };
+
+  const openSheet = (context, initial = null) => setSheet({ context, initial });
+  const closeSheet = () => setSheet(null);
+
+  const handleToggle = (dk, taskInstanceId) => mutate((prev) => ({ ...prev, dailyLogs: { ...prev.dailyLogs, [dk]: prev.dailyLogs[dk].map((t) => (t.id === taskInstanceId ? { ...t, done: !t.done } : t)) } }));
+  const handleRemove = (dk, taskInstanceId) => mutate((prev) => ({ ...prev, dailyLogs: { ...prev.dailyLogs, [dk]: prev.dailyLogs[dk].filter((t) => t.id !== taskInstanceId) } }));
+  const handleGenerateDay = (dk) => mutate((prev) => generateIfNeeded(prev, dk));
+
+  const handleAddOneOff = (dk, { name, category }) => mutate((prev) => {
+    const p = generateIfNeeded(prev, dk);
+    const list = p.dailyLogs[dk] || [];
+    return { ...p, dailyLogs: { ...p.dailyLogs, [dk]: [...list, { id: uid("o"), name, category, done: false, taskId: null }] } };
+  });
+
+  const handleAddTask = ({ name, category, isDaily, weekdays }) => mutate((prev) => {
+    const wk = normalizeWeekdays(weekdays);
+    const newTask = { id: uid("m"), name, category, isDaily, weekdays: wk, done: false };
+    const tasks = [...prev.tasks, newTask];
+    const todayLog = prev.dailyLogs[todayKey] || [];
+    let dailyLogs = prev.dailyLogs;
+    if (isDaily && wk.includes(new Date().getDay())) {
+      dailyLogs = { ...dailyLogs, [todayKey]: [...todayLog, { id: uid("t"), name, category, done: false, taskId: newTask.id }] };
+    }
+    return { ...prev, tasks, dailyLogs };
+  });
+
+  const handleEditTask = (id, { name, category, isDaily, weekdays }) => mutate((prev) => {
+    const wk = normalizeWeekdays(weekdays);
+    const tasks = prev.tasks.map((t) => (t.id === id ? { ...t, name, category, isDaily, weekdays: wk, done: isDaily ? false : t.done } : t));
+    const todayLog = prev.dailyLogs[todayKey] || [];
+    const wd = new Date().getDay();
+    const existing = todayLog.find((t) => t.taskId === id);
+    const shouldAppear = isDaily && wk.includes(wd);
+    let dailyLogs = prev.dailyLogs;
+    if (shouldAppear && !existing) {
+      dailyLogs = { ...dailyLogs, [todayKey]: [...todayLog, { id: uid("t"), name, category, done: false, taskId: id }] };
+    } else if (!shouldAppear && existing) {
+      dailyLogs = { ...dailyLogs, [todayKey]: todayLog.filter((t) => t.taskId !== id) };
+    } else if (shouldAppear && existing) {
+      dailyLogs = { ...dailyLogs, [todayKey]: todayLog.map((t) => (t.taskId === id ? { ...t, name, category } : t)) };
+    }
+    return { ...prev, tasks, dailyLogs };
+  });
+
+  const handleToggleDaily = (id) => mutate((prev) => {
+    const task = prev.tasks.find((t) => t.id === id);
+    if (!task) return prev;
+    const newIsDaily = !task.isDaily;
+    const tasks = prev.tasks.map((t) => (t.id === id ? { ...t, isDaily: newIsDaily, done: newIsDaily ? false : t.done } : t));
+    const todayLog = prev.dailyLogs[todayKey] || [];
+    const wd = new Date().getDay();
+    const existing = todayLog.find((t) => t.taskId === id);
+    let dailyLogs = prev.dailyLogs;
+    if (newIsDaily && task.weekdays.includes(wd) && !existing) {
+      dailyLogs = { ...dailyLogs, [todayKey]: [...todayLog, { id: uid("t"), name: task.name, category: task.category, done: false, taskId: id }] };
+    } else if (!newIsDaily && existing) {
+      dailyLogs = { ...dailyLogs, [todayKey]: todayLog.filter((t) => t.taskId !== id) };
+    }
+    return { ...prev, tasks, dailyLogs };
+  });
+
+  const handleToggleDone = (id) => mutate((prev) => ({ ...prev, tasks: prev.tasks.map((t) => (t.id === id ? { ...t, done: !t.done } : t)) }));
+
+  const handleDeleteTask = (id) => mutate((prev) => {
+    const tasks = prev.tasks.filter((t) => t.id !== id);
+    const todayLog = prev.dailyLogs[todayKey] || [];
+    const dailyLogs = { ...prev.dailyLogs, [todayKey]: todayLog.filter((t) => t.taskId !== id) };
+    return { ...prev, tasks, dailyLogs };
+  });
+
+  const onSubmitOneOff = (payload) => {
+    const dk = sheet.context === "day-add" ? detailDateKey : todayKey;
+    handleAddOneOff(dk, payload);
+    closeSheet();
+  };
+  const onSubmitTask = (payload, editId) => {
+    if (editId) handleEditTask(editId, payload);
+    else handleAddTask(payload);
+    closeSheet();
+  };
+  const onDeleteFromSheet = (id) => { handleDeleteTask(id); closeSheet(); };
+
+  const checkingAuth = authUser === undefined;
+
+  return (
+    <div className="w-full flex justify-center" style={{ background: "#0B0E13", minHeight: "100vh" }}>
+      <div className="w-full flex flex-col overflow-hidden" style={{ maxWidth: 430, height: "100vh", background: BG, color: TEXT, fontFamily: "Inter, sans-serif" }}>
+        {checkingAuth ? (
+          <div className="flex-1 flex items-center justify-center" style={{ color: MUTED, fontSize: 13 }}>Loading…</div>
+        ) : !authUser ? (
+          <SignInScreen onSignIn={handleSignIn} error={authError} />
+        ) : !loaded ? (
+          <>
+            <AccountBar user={authUser} onSignOut={handleSignOut} />
+            <div className="flex-1 flex items-center justify-center" style={{ color: MUTED, fontSize: 13 }}>Syncing…</div>
+          </>
+        ) : (
+          <>
+            <AccountBar user={authUser} onSignOut={handleSignOut} />
+            <div className="flex-1 overflow-y-auto">
+              {view === "today" && <TodayView data={data} todayKey={todayKey} onToggle={(id) => handleToggle(todayKey, id)} onRemove={(id) => handleRemove(todayKey, id)} onOpenAdd={() => openSheet("add")} />}
+              {view === "calendar" && <CalendarView data={data} monthDate={monthDate} setMonthDate={setMonthDate} onOpenDay={setDetailDateKey} />}
+              {view === "manage" && <ManageView tasks={data.tasks} onAddClick={() => openSheet("add")} onEditClick={(t) => openSheet("edit", t)} onToggleDaily={handleToggleDaily} onToggleDone={handleToggleDone} />}
+            </div>
+            <BottomNav view={view} setView={setView} />
+          </>
+        )}
+      </div>
+      {sheet && <TaskFormSheet sheet={sheet} onCancel={closeSheet} onSubmitTask={onSubmitTask} onSubmitOneOff={onSubmitOneOff} onDelete={onDeleteFromSheet} />}
+      {detailDateKey && (
+        <DayDetailSheet dateKeyStr={detailDateKey} data={data} onClose={() => setDetailDateKey(null)} onToggle={(id) => handleToggle(detailDateKey, id)} onRemove={(id) => handleRemove(detailDateKey, id)} onOpenAdd={() => openSheet("day-add")} onGenerate={() => handleGenerateDay(detailDateKey)} />
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
