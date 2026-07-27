@@ -47,7 +47,7 @@
 <body>
 <div id="root"></div>
 <script type="text/babel">
-const { useState, useEffect, useCallback } = React;
+const { useState, useEffect, useRef, useCallback } = React;
 
 /* ---------- design tokens ---------- */
 const BG = "#14181F", SURFACE = "#1E2430", SURFACE2 = "#262E3D";
@@ -70,6 +70,7 @@ const pad = (n) => String(n).padStart(2, "0");
 const dateKey = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const uid = (p) => `${p}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
 const normalizeWeekdays = (w) => (w && w.length ? w : [0, 1, 2, 3, 4, 5, 6]);
+const normalizeTask = (t) => ({ targetCount: 1, remind: false, remindFrom: "09:00", remindTo: "18:00", ...t });
 
 function hexToRgba(hex, alpha) {
   const c = hex.replace("#", "");
@@ -97,13 +98,18 @@ function buildRing(tasks) {
 }
 
 function migrate(raw) {
-  if (raw.tasks) return raw;
-  const tasks = (raw.recurringTasks || []).map((t) => ({ ...t, isDaily: true, done: false }));
-  const dailyLogs = {};
-  Object.entries(raw.dailyLogs || {}).forEach(([k, list]) => {
-    dailyLogs[k] = list.map((t) => ({ ...t, taskId: t.recurringId ?? t.taskId ?? null }));
-  });
-  return { tasks, dailyLogs };
+  let tasks, dailyLogs;
+  if (raw.tasks) {
+    tasks = raw.tasks;
+    dailyLogs = raw.dailyLogs || {};
+  } else {
+    tasks = (raw.recurringTasks || []).map((t) => ({ ...t, isDaily: true, done: false }));
+    dailyLogs = {};
+    Object.entries(raw.dailyLogs || {}).forEach(([k, list]) => {
+      dailyLogs[k] = list.map((t) => ({ ...t, taskId: t.recurringId ?? t.taskId ?? null }));
+    });
+  }
+  return { tasks: tasks.map(normalizeTask), dailyLogs };
 }
 
 function generateIfNeeded(data, key) {
@@ -112,7 +118,7 @@ function generateIfNeeded(data, key) {
   const wd = d.getDay();
   const tasks = data.tasks
     .filter((t) => t.isDaily && t.weekdays.includes(wd))
-    .map((t) => ({ id: uid("t"), name: t.name, category: t.category, done: false, taskId: t.id }));
+    .map((t) => ({ id: uid("t"), name: t.name, category: t.category, done: false, taskId: t.id, targetCount: t.targetCount || 1, count: 0 }));
   return { ...data, dailyLogs: { ...data.dailyLogs, [key]: tasks } };
 }
 
@@ -144,6 +150,21 @@ function whenFirebaseReady(cb) {
   else window.addEventListener("fb-ready", () => cb(window.fb), { once: true });
 }
 
+// deterministic pseudo-random moment within [from,to] on a given day, stable per day+task
+function seededTimeWithinWindow(dayKeyStr, taskId, from, to) {
+  const seedStr = dayKeyStr + taskId;
+  let h = 0;
+  for (let i = 0; i < seedStr.length; i++) h = (h * 31 + seedStr.charCodeAt(i)) >>> 0;
+  const frac = (h % 10000) / 10000;
+  const [fh, fm] = from.split(":").map(Number);
+  const [th, tm] = to.split(":").map(Number);
+  const dayStart = new Date(`${dayKeyStr}T00:00:00`).getTime();
+  const fromMs = dayStart + (fh * 60 + fm) * 60000;
+  const toMs = dayStart + (th * 60 + tm) * 60000;
+  const span = Math.max(toMs - fromMs, 60000);
+  return fromMs + frac * span;
+}
+
 /* ---------- small components ---------- */
 function RingProgress({ tasks, size = 96, thickness = 10, showPercent = true }) {
   const total = tasks ? tasks.length : 0;
@@ -171,6 +192,16 @@ function Toggle({ on, onClick }) {
   );
 }
 
+function Stepper({ value, onDec, onInc }) {
+  return (
+    <div className="flex items-center gap-3">
+      <button onClick={onDec} style={{ width: 28, height: 28, borderRadius: "50%", background: SURFACE2, border: `1px solid ${BORDER}`, color: TEXT, fontSize: 15 }}>−</button>
+      <span style={{ fontFamily: '"IBM Plex Mono", monospace', width: 20, textAlign: "center", fontSize: 14 }}>{value}</span>
+      <button onClick={onInc} style={{ width: 28, height: 28, borderRadius: "50%", background: SURFACE2, border: `1px solid ${BORDER}`, color: TEXT, fontSize: 15 }}>+</button>
+    </div>
+  );
+}
+
 function EmptyState({ message, cta, onClick }) {
   return (
     <div className="text-center py-10">
@@ -180,18 +211,30 @@ function EmptyState({ message, cta, onClick }) {
   );
 }
 
-function TaskRow({ task, onToggle, onRemove }) {
+function TaskRow({ task, onTap, onRemove }) {
+  const target = task.targetCount || 1;
+  const count = task.count || 0;
   return (
     <div className="flex items-center gap-3 py-2 px-3 rounded-xl" style={{ background: SURFACE2 }}>
-      <button onClick={onToggle} style={{
-        width: 22, height: 22, borderRadius: 6, flexShrink: 0,
-        border: `2px solid ${task.done ? ACCENT : BORDER}`,
-        background: task.done ? ACCENT : "transparent",
-        display: "flex", alignItems: "center", justifyContent: "center",
-      }}>
-        {task.done && <span style={{ color: BG, fontSize: 13, fontWeight: 700 }}>✓</span>}
+      <button
+        onClick={onTap}
+        style={{
+          width: 26, height: 26, borderRadius: 8, flexShrink: 0,
+          border: `2px solid ${task.done ? ACCENT : BORDER}`,
+          background: task.done ? ACCENT : "transparent",
+          display: "flex", alignItems: "center", justifyContent: "center",
+        }}
+      >
+        {task.done ? (
+          <span style={{ color: BG, fontSize: 13, fontWeight: 700 }}>✓</span>
+        ) : target > 1 && count > 0 ? (
+          <span style={{ color: ACCENT, fontSize: 11, fontWeight: 700 }}>{count}</span>
+        ) : null}
       </button>
-      <span style={{ flex: 1, fontSize: 14, textDecoration: task.done ? "line-through" : "none", color: task.done ? MUTED : TEXT }}>{task.name}</span>
+      <div style={{ flex: 1 }}>
+        <div style={{ fontSize: 14, textDecoration: task.done ? "line-through" : "none", color: task.done ? MUTED : TEXT }}>{task.name}</div>
+        {target > 1 && <div style={{ fontSize: 11, color: MUTED }}>{count}/{target} today</div>}
+      </div>
       <button onClick={onRemove} style={{ color: MUTED, fontSize: 16, lineHeight: 1 }}>×</button>
     </div>
   );
@@ -253,8 +296,17 @@ function AccountBar({ user, onSignOut }) {
   );
 }
 
+function NotifBanner({ onEnable }) {
+  return (
+    <div className="mx-5 mt-4 mb-1 p-3 rounded-xl flex items-center justify-between gap-3" style={{ background: SURFACE2, border: `1px solid ${BORDER}` }}>
+      <span style={{ fontSize: 12, color: MUTED }}>Enable notifications so Ledger can remind you</span>
+      <button onClick={onEnable} style={{ fontSize: 12, color: ACCENT, fontWeight: 600, flexShrink: 0 }}>Enable</button>
+    </div>
+  );
+}
+
 /* ---------- views ---------- */
-function TodayView({ data, todayKey, onToggle, onRemove, onOpenAdd }) {
+function TodayView({ data, todayKey, onTap, onRemove, onOpenAdd }) {
   const tasks = data.dailyLogs[todayKey] || [];
   const streak = computeStreak(data.dailyLogs, todayKey);
   const activeCats = CATEGORIES.filter((cat) => tasks.some((t) => t.category === cat.id));
@@ -282,7 +334,7 @@ function TodayView({ data, todayKey, onToggle, onRemove, onOpenAdd }) {
               </div>
               <div className="space-y-2">
                 {tasks.filter((t) => t.category === cat.id).map((t) => (
-                  <TaskRow key={t.id} task={t} onToggle={() => onToggle(t.id)} onRemove={() => onRemove(t.id)} />
+                  <TaskRow key={t.id} task={t} onTap={() => onTap(t.id)} onRemove={() => onRemove(t.id)} />
                 ))}
               </div>
             </div>
@@ -337,6 +389,8 @@ function CalendarView({ data, monthDate, setMonthDate, onOpenDay }) {
 function TaskManageRow({ task, onEdit, onToggleDaily, onToggleDone }) {
   const cat = CATEGORIES.find((c) => c.id === task.category);
   const days = task.weekdays.length === 7 ? "Every day" : task.weekdays.map((i) => ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"][i]).join(" ");
+  const reps = task.targetCount > 1 ? ` · ${task.targetCount}x/day` : "";
+  const bell = task.remind ? ` · 🔔 ${task.remindFrom}–${task.remindTo}` : "";
   return (
     <div className="flex items-center gap-2 py-2.5 px-3 rounded-xl" style={{ background: SURFACE }}>
       {task.isDaily ? (
@@ -356,7 +410,7 @@ function TaskManageRow({ task, onEdit, onToggleDaily, onToggleDone }) {
           {task.name}
         </div>
         <div style={{ fontSize: 11, color: MUTED }}>
-          {cat?.label}{task.isDaily ? ` · ${days}` : ""}
+          {cat?.label}{task.isDaily ? ` · ${days}` : ""}{reps}{bell}
         </div>
       </div>
       <div className="flex flex-col items-center gap-0.5" style={{ flexShrink: 0 }}>
@@ -410,7 +464,7 @@ function ManageView({ tasks, onAddClick, onEditClick, onToggleDaily, onToggleDon
   );
 }
 
-function DayDetailSheet({ dateKeyStr, data, onClose, onToggle, onRemove, onOpenAdd, onGenerate }) {
+function DayDetailSheet({ dateKeyStr, data, onClose, onTap, onRemove, onOpenAdd, onGenerate }) {
   const tasks = data.dailyLogs[dateKeyStr];
   const d = new Date(`${dateKeyStr}T00:00:00`);
   const activeCats = tasks ? CATEGORIES.filter((cat) => tasks.some((t) => t.category === cat.id)) : [];
@@ -449,7 +503,7 @@ function DayDetailSheet({ dateKeyStr, data, onClose, onToggle, onRemove, onOpenA
               </div>
             )}
             <div className="space-y-2 mb-4">
-              {tasks.map((t) => (<TaskRow key={t.id} task={t} onToggle={() => onToggle(t.id)} onRemove={() => onRemove(t.id)} />))}
+              {tasks.map((t) => (<TaskRow key={t.id} task={t} onTap={() => onTap(t.id)} onRemove={() => onRemove(t.id)} />))}
             </div>
             <button onClick={onOpenAdd} className="w-full py-3 rounded-xl flex items-center justify-center gap-2" style={{ background: SURFACE2, color: TEXT }}>+ Add task for this day</button>
           </>
@@ -462,23 +516,35 @@ function DayDetailSheet({ dateKeyStr, data, onClose, onToggle, onRemove, onOpenA
 function TaskFormSheet({ sheet, onCancel, onSubmitTask, onSubmitOneOff, onDelete }) {
   const isDayAdd = sheet.context === "day-add";
   const isEdit = sheet.context === "edit";
-  const initial = sheet.initial || { name: "", category: CATEGORIES[0].id, isDaily: false, weekdays: [0, 1, 2, 3, 4, 5, 6] };
+  const initial = sheet.initial || { name: "", category: CATEGORIES[0].id, isDaily: false, weekdays: [0, 1, 2, 3, 4, 5, 6], targetCount: 1, remind: false, remindFrom: "09:00", remindTo: "18:00" };
   const [name, setName] = useState(initial.name);
   const [category, setCategory] = useState(initial.category);
   const [isDaily, setIsDaily] = useState(initial.isDaily ?? false);
   const [weekdays, setWeekdays] = useState(initial.weekdays ?? [0, 1, 2, 3, 4, 5, 6]);
+  const [targetCount, setTargetCount] = useState(initial.targetCount || 1);
+  const [remind, setRemind] = useState(initial.remind ?? false);
+  const [remindFrom, setRemindFrom] = useState(initial.remindFrom ?? "09:00");
+  const [remindTo, setRemindTo] = useState(initial.remindTo ?? "18:00");
 
   const toggleWeekday = (i) => setWeekdays((w) => (w.includes(i) ? w.filter((x) => x !== i) : [...w, i].sort()));
 
   const submit = () => {
     if (!name.trim()) return;
-    if (isDayAdd) onSubmitOneOff({ name: name.trim(), category });
-    else onSubmitTask({ name: name.trim(), category, isDaily, weekdays: normalizeWeekdays(weekdays) }, isEdit ? initial.id : null);
+    if (isDayAdd) {
+      onSubmitOneOff({ name: name.trim(), category, targetCount });
+      return;
+    }
+    let from = remindFrom, to = remindTo;
+    if (remind && from >= to) { const tmp = from; from = to; to = tmp; }
+    onSubmitTask(
+      { name: name.trim(), category, isDaily, weekdays: normalizeWeekdays(weekdays), targetCount, remind: isDaily && remind, remindFrom: from, remindTo: to },
+      isEdit ? initial.id : null
+    );
   };
 
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center" style={{ background: "rgba(0,0,0,0.55)" }} onClick={onCancel}>
-      <div onClick={(e) => e.stopPropagation()} className="w-full rounded-t-3xl p-5" style={{ maxWidth: 430, background: SURFACE }}>
+      <div onClick={(e) => e.stopPropagation()} className="w-full rounded-t-3xl p-5" style={{ maxWidth: 430, background: SURFACE, maxHeight: "88vh", overflowY: "auto" }}>
         <div className="flex justify-between items-center mb-4">
           <div style={{ fontFamily: "Fraunces, serif", fontSize: 18, fontWeight: 600 }}>{isEdit ? "Edit task" : isDayAdd ? "Add task for this day" : "Add a task"}</div>
           <button onClick={onCancel} style={{ color: MUTED, fontSize: 18 }}>×</button>
@@ -492,6 +558,15 @@ function TaskFormSheet({ sheet, onCancel, onSubmitTask, onSubmitOneOff, onDelete
             </button>
           ))}
         </div>
+
+        <div className="flex items-center justify-between mb-4 px-1">
+          <div>
+            <div style={{ fontSize: 14 }}>Times per day</div>
+            <div style={{ fontSize: 11, color: MUTED }}>Complete it this many times to finish</div>
+          </div>
+          <Stepper value={targetCount} onDec={() => setTargetCount((c) => Math.max(1, c - 1))} onInc={() => setTargetCount((c) => Math.min(20, c + 1))} />
+        </div>
+
         {!isDayAdd && (
           <>
             <div className="flex items-center justify-between mb-4 px-1">
@@ -502,16 +577,37 @@ function TaskFormSheet({ sheet, onCancel, onSubmitTask, onSubmitOneOff, onDelete
               <Toggle on={isDaily} onClick={() => setIsDaily((v) => !v)} />
             </div>
             {isDaily && (
-              <div className="mb-5">
-                <div style={{ fontSize: 12, color: MUTED, marginBottom: 8 }}>Repeats on</div>
-                <div className="flex gap-2">
-                  {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map((d, i) => (
-                    <button key={i} onClick={() => toggleWeekday(i)} style={{ width: 34, height: 34, borderRadius: "50%", fontSize: 11, background: weekdays.includes(i) ? ACCENT : "transparent", color: weekdays.includes(i) ? BG : MUTED, border: `1px solid ${weekdays.includes(i) ? ACCENT : BORDER}` }}>
-                      {d}
-                    </button>
-                  ))}
+              <>
+                <div className="mb-5">
+                  <div style={{ fontSize: 12, color: MUTED, marginBottom: 8 }}>Repeats on</div>
+                  <div className="flex gap-2">
+                    {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map((d, i) => (
+                      <button key={i} onClick={() => toggleWeekday(i)} style={{ width: 34, height: 34, borderRadius: "50%", fontSize: 11, background: weekdays.includes(i) ? ACCENT : "transparent", color: weekdays.includes(i) ? BG : MUTED, border: `1px solid ${weekdays.includes(i) ? ACCENT : BORDER}` }}>
+                        {d}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-              </div>
+                <div className="flex items-center justify-between mb-4 px-1">
+                  <div>
+                    <div style={{ fontSize: 14 }}>Remind me</div>
+                    <div style={{ fontSize: 11, color: MUTED }}>Browser notification, sometime in a window</div>
+                  </div>
+                  <Toggle on={remind} onClick={() => setRemind((v) => !v)} />
+                </div>
+                {remind && (
+                  <div className="flex items-center gap-3 mb-5 px-1">
+                    <div className="flex-1">
+                      <div style={{ fontSize: 11, color: MUTED, marginBottom: 4 }}>From</div>
+                      <input type="time" value={remindFrom} onChange={(e) => setRemindFrom(e.target.value)} className="w-full px-3 py-2 rounded-lg" style={{ background: SURFACE2, color: TEXT, border: `1px solid ${BORDER}`, fontSize: 13 }} />
+                    </div>
+                    <div className="flex-1">
+                      <div style={{ fontSize: 11, color: MUTED, marginBottom: 4 }}>To</div>
+                      <input type="time" value={remindTo} onChange={(e) => setRemindTo(e.target.value)} className="w-full px-3 py-2 rounded-lg" style={{ background: SURFACE2, color: TEXT, border: `1px solid ${BORDER}`, fontSize: 13 }} />
+                    </div>
+                  </div>
+                )}
+              </>
             )}
           </>
         )}
@@ -529,7 +625,7 @@ function TaskFormSheet({ sheet, onCancel, onSubmitTask, onSubmitOneOff, onDelete
 /* ---------- app ---------- */
 function App() {
   const [fb, setFb] = useState(null);
-  const [authUser, setAuthUser] = useState(undefined); // undefined = checking, null = signed out, object = signed in
+  const [authUser, setAuthUser] = useState(undefined);
   const [authError, setAuthError] = useState(null);
   const [data, setData] = useState({ tasks: [], dailyLogs: {} });
   const [loaded, setLoaded] = useState(false);
@@ -537,10 +633,13 @@ function App() {
   const [monthDate, setMonthDate] = useState(new Date());
   const [detailDateKey, setDetailDateKey] = useState(null);
   const [sheet, setSheet] = useState(null);
+  const [notifPermission, setNotifPermission] = useState(typeof Notification !== "undefined" ? Notification.permission : "unsupported");
+
+  const dataRef = useRef(data);
+  useEffect(() => { dataRef.current = data; }, [data]);
 
   const todayKey = dateKey(new Date());
 
-  // 1. wait for firebase to init, then track auth state
   useEffect(() => {
     let unsub = () => {};
     whenFirebaseReady((fbApi) => {
@@ -550,7 +649,6 @@ function App() {
     return () => unsub();
   }, []);
 
-  // 2. once signed in, subscribe live to this user's document in Firestore
   useEffect(() => {
     if (!fb || !authUser) return;
     setLoaded(false);
@@ -560,9 +658,7 @@ function App() {
       async (snap) => {
         let raw = { tasks: [], dailyLogs: {} };
         const existingRaw = snap.exists() ? snap.data().data : null;
-        if (existingRaw) {
-          try { raw = JSON.parse(existingRaw); } catch (e) { /* corrupt — start fresh */ }
-        }
+        if (existingRaw) { try { raw = JSON.parse(existingRaw); } catch (e) {} }
         const migrated = migrate(raw);
         const withToday = generateIfNeeded(migrated, dateKey(new Date()));
         setData(withToday);
@@ -576,6 +672,27 @@ function App() {
     );
     return () => unsub();
   }, [fb, authUser]);
+
+  // schedule browser notifications for daily tasks with reminders on, while this tab stays open
+  useEffect(() => {
+    if (typeof Notification === "undefined") return;
+    const timers = [];
+    const todayKeyNow = dateKey(new Date());
+    data.tasks.filter((t) => t.isDaily && t.remind).forEach((t) => {
+      const target = seededTimeWithinWindow(todayKeyNow, t.id, t.remindFrom, t.remindTo);
+      const delay = target - Date.now();
+      if (delay <= 0) return;
+      const timer = setTimeout(() => {
+        if (Notification.permission !== "granted") return;
+        const todayTasks = dataRef.current.dailyLogs[todayKeyNow] || [];
+        const instance = todayTasks.find((i) => i.taskId === t.id);
+        if (instance && instance.done) return;
+        new Notification("Ledger", { body: t.name });
+      }, delay);
+      timers.push(timer);
+    });
+    return () => timers.forEach(clearTimeout);
+  }, [data.tasks, todayKey]);
 
   const mutate = useCallback((updater) => {
     setData((prev) => {
@@ -594,46 +711,63 @@ function App() {
     catch (e) { setAuthError("Sign-in failed. Please try again."); console.error(e); }
   };
   const handleSignOut = () => { fb.signOut(fb.auth); setData({ tasks: [], dailyLogs: {} }); setLoaded(false); };
+  const handleEnableNotifications = () => {
+    Notification.requestPermission().then((p) => setNotifPermission(p));
+  };
 
   const openSheet = (context, initial = null) => setSheet({ context, initial });
   const closeSheet = () => setSheet(null);
 
-  const handleToggle = (dk, taskInstanceId) => mutate((prev) => ({ ...prev, dailyLogs: { ...prev.dailyLogs, [dk]: prev.dailyLogs[dk].map((t) => (t.id === taskInstanceId ? { ...t, done: !t.done } : t)) } }));
+  const handleTapTask = (dk, taskInstanceId) => mutate((prev) => ({
+    ...prev,
+    dailyLogs: {
+      ...prev.dailyLogs,
+      [dk]: prev.dailyLogs[dk].map((t) => {
+        if (t.id !== taskInstanceId) return t;
+        const target = t.targetCount || 1;
+        const count = t.count || 0;
+        if (count >= target) return { ...t, count: 0, done: false };
+        const newCount = count + 1;
+        return { ...t, count: newCount, done: newCount >= target };
+      }),
+    },
+  }));
+
   const handleRemove = (dk, taskInstanceId) => mutate((prev) => ({ ...prev, dailyLogs: { ...prev.dailyLogs, [dk]: prev.dailyLogs[dk].filter((t) => t.id !== taskInstanceId) } }));
   const handleGenerateDay = (dk) => mutate((prev) => generateIfNeeded(prev, dk));
 
-  const handleAddOneOff = (dk, { name, category }) => mutate((prev) => {
+  const handleAddOneOff = (dk, { name, category, targetCount }) => mutate((prev) => {
     const p = generateIfNeeded(prev, dk);
     const list = p.dailyLogs[dk] || [];
-    return { ...p, dailyLogs: { ...p.dailyLogs, [dk]: [...list, { id: uid("o"), name, category, done: false, taskId: null }] } };
+    return { ...p, dailyLogs: { ...p.dailyLogs, [dk]: [...list, { id: uid("o"), name, category, done: false, taskId: null, targetCount: targetCount || 1, count: 0 }] } };
   });
 
-  const handleAddTask = ({ name, category, isDaily, weekdays }) => mutate((prev) => {
+  const handleAddTask = ({ name, category, isDaily, weekdays, targetCount, remind, remindFrom, remindTo }) => mutate((prev) => {
     const wk = normalizeWeekdays(weekdays);
-    const newTask = { id: uid("m"), name, category, isDaily, weekdays: wk, done: false };
+    const newTask = { id: uid("m"), name, category, isDaily, weekdays: wk, done: false, targetCount: targetCount || 1, remind: !!remind, remindFrom, remindTo };
     const tasks = [...prev.tasks, newTask];
     const todayLog = prev.dailyLogs[todayKey] || [];
     let dailyLogs = prev.dailyLogs;
     if (isDaily && wk.includes(new Date().getDay())) {
-      dailyLogs = { ...dailyLogs, [todayKey]: [...todayLog, { id: uid("t"), name, category, done: false, taskId: newTask.id }] };
+      dailyLogs = { ...dailyLogs, [todayKey]: [...todayLog, { id: uid("t"), name, category, done: false, taskId: newTask.id, targetCount: newTask.targetCount, count: 0 }] };
     }
     return { ...prev, tasks, dailyLogs };
   });
 
-  const handleEditTask = (id, { name, category, isDaily, weekdays }) => mutate((prev) => {
+  const handleEditTask = (id, { name, category, isDaily, weekdays, targetCount, remind, remindFrom, remindTo }) => mutate((prev) => {
     const wk = normalizeWeekdays(weekdays);
-    const tasks = prev.tasks.map((t) => (t.id === id ? { ...t, name, category, isDaily, weekdays: wk, done: isDaily ? false : t.done } : t));
+    const tasks = prev.tasks.map((t) => (t.id === id ? { ...t, name, category, isDaily, weekdays: wk, done: isDaily ? false : t.done, targetCount: targetCount || 1, remind: !!remind, remindFrom, remindTo } : t));
     const todayLog = prev.dailyLogs[todayKey] || [];
     const wd = new Date().getDay();
     const existing = todayLog.find((t) => t.taskId === id);
     const shouldAppear = isDaily && wk.includes(wd);
     let dailyLogs = prev.dailyLogs;
     if (shouldAppear && !existing) {
-      dailyLogs = { ...dailyLogs, [todayKey]: [...todayLog, { id: uid("t"), name, category, done: false, taskId: id }] };
+      dailyLogs = { ...dailyLogs, [todayKey]: [...todayLog, { id: uid("t"), name, category, done: false, taskId: id, targetCount: targetCount || 1, count: 0 }] };
     } else if (!shouldAppear && existing) {
       dailyLogs = { ...dailyLogs, [todayKey]: todayLog.filter((t) => t.taskId !== id) };
     } else if (shouldAppear && existing) {
-      dailyLogs = { ...dailyLogs, [todayKey]: todayLog.map((t) => (t.taskId === id ? { ...t, name, category } : t)) };
+      dailyLogs = { ...dailyLogs, [todayKey]: todayLog.map((t) => (t.taskId === id ? { ...t, name, category, targetCount: targetCount || 1 } : t)) };
     }
     return { ...prev, tasks, dailyLogs };
   });
@@ -648,7 +782,7 @@ function App() {
     const existing = todayLog.find((t) => t.taskId === id);
     let dailyLogs = prev.dailyLogs;
     if (newIsDaily && task.weekdays.includes(wd) && !existing) {
-      dailyLogs = { ...dailyLogs, [todayKey]: [...todayLog, { id: uid("t"), name: task.name, category: task.category, done: false, taskId: id }] };
+      dailyLogs = { ...dailyLogs, [todayKey]: [...todayLog, { id: uid("t"), name: task.name, category: task.category, done: false, taskId: id, targetCount: task.targetCount || 1, count: 0 }] };
     } else if (!newIsDaily && existing) {
       dailyLogs = { ...dailyLogs, [todayKey]: todayLog.filter((t) => t.taskId !== id) };
     }
@@ -677,6 +811,7 @@ function App() {
   const onDeleteFromSheet = (id) => { handleDeleteTask(id); closeSheet(); };
 
   const checkingAuth = authUser === undefined;
+  const needsNotifPermission = data.tasks.some((t) => t.remind) && notifPermission === "default";
 
   return (
     <div className="w-full flex justify-center" style={{ background: "#0B0E13", minHeight: "100vh" }}>
@@ -693,8 +828,9 @@ function App() {
         ) : (
           <>
             <AccountBar user={authUser} onSignOut={handleSignOut} />
+            {needsNotifPermission && <NotifBanner onEnable={handleEnableNotifications} />}
             <div className="flex-1 overflow-y-auto">
-              {view === "today" && <TodayView data={data} todayKey={todayKey} onToggle={(id) => handleToggle(todayKey, id)} onRemove={(id) => handleRemove(todayKey, id)} onOpenAdd={() => openSheet("add")} />}
+              {view === "today" && <TodayView data={data} todayKey={todayKey} onTap={(id) => handleTapTask(todayKey, id)} onRemove={(id) => handleRemove(todayKey, id)} onOpenAdd={() => openSheet("add")} />}
               {view === "calendar" && <CalendarView data={data} monthDate={monthDate} setMonthDate={setMonthDate} onOpenDay={setDetailDateKey} />}
               {view === "manage" && <ManageView tasks={data.tasks} onAddClick={() => openSheet("add")} onEditClick={(t) => openSheet("edit", t)} onToggleDaily={handleToggleDaily} onToggleDone={handleToggleDone} />}
             </div>
@@ -704,7 +840,7 @@ function App() {
       </div>
       {sheet && <TaskFormSheet sheet={sheet} onCancel={closeSheet} onSubmitTask={onSubmitTask} onSubmitOneOff={onSubmitOneOff} onDelete={onDeleteFromSheet} />}
       {detailDateKey && (
-        <DayDetailSheet dateKeyStr={detailDateKey} data={data} onClose={() => setDetailDateKey(null)} onToggle={(id) => handleToggle(detailDateKey, id)} onRemove={(id) => handleRemove(detailDateKey, id)} onOpenAdd={() => openSheet("day-add")} onGenerate={() => handleGenerateDay(detailDateKey)} />
+        <DayDetailSheet dateKeyStr={detailDateKey} data={data} onClose={() => setDetailDateKey(null)} onTap={(id) => handleTapTask(detailDateKey, id)} onRemove={(id) => handleRemove(detailDateKey, id)} onOpenAdd={() => openSheet("day-add")} onGenerate={() => handleGenerateDay(detailDateKey)} />
       )}
     </div>
   );
