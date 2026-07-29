@@ -343,21 +343,23 @@ function NotifBanner({ onEnable }) {
   );
 }
 
-function InstallBanner({ mode, onInstall, onDismiss }) {
+function InstallSection({ iosMode, onInstallClick, message }) {
   return (
-    <div className="mx-5 mt-4 mb-1 p-3 rounded-xl" style={{ background: SURFACE2, border: `1px solid ${BORDER}` }}>
-      {mode === "prompt" ? (
-        <div className="flex items-center justify-between gap-3">
-          <span style={{ fontSize: 12, color: MUTED }}>Add Ledger to your home screen for quick access</span>
-          <button onClick={onInstall} style={{ fontSize: 12, color: ACCENT, fontWeight: 700, flexShrink: 0 }}>Install</button>
+    <div className="mt-8">
+      <div style={{ fontSize: 11, color: MUTED, letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 8 }}>Home Screen</div>
+      {iosMode ? (
+        <div className="p-3 rounded-xl" style={{ background: SURFACE, border: `1px solid ${BORDER}` }}>
+          <div style={{ fontSize: 12, color: MUTED }}>
+            On iPhone: tap the <b style={{ color: TEXT }}>Share</b> button in Safari, then <b style={{ color: TEXT }}>Add to Home Screen</b>.
+          </div>
         </div>
       ) : (
-        <div className="flex items-start justify-between gap-3">
-          <span style={{ fontSize: 12, color: MUTED }}>
-            Add to Home Screen: tap the <b style={{ color: TEXT }}>Share</b> button in Safari, then <b style={{ color: TEXT }}>Add to Home Screen</b>.
-          </span>
-          <button onClick={onDismiss} style={{ fontSize: 16, color: MUTED, flexShrink: 0 }}>×</button>
-        </div>
+        <>
+          <button onClick={onInstallClick} className="w-full py-3 rounded-xl flex items-center justify-center gap-2" style={{ background: SURFACE, border: `1px solid ${BORDER}`, color: TEXT }}>
+            + Add to Home Screen
+          </button>
+          {message && <div style={{ fontSize: 11, color: MUTED, marginTop: 8, textAlign: "center" }}>{message}</div>}
+        </>
       )}
     </div>
   );
@@ -506,13 +508,13 @@ function CategoryRow({ cat, onEdit }) {
   );
 }
 
-function ManageView({ tasks, categories, onAddClick, onEditClick, onToggleDaily, onToggleDone, onAddCategory, onEditCategory }) {
+function ManageView({ tasks, categories, onAddClick, onEditClick, onToggleDaily, onToggleDone, onAddCategory, onEditCategory, iosMode, onInstallClick, installMsg }) {
   const dailyTasks = tasks.filter((t) => t.isDaily);
   const longTermTasks = tasks.filter((t) => !t.isDaily);
   return (
     <div className="px-5 pt-6 pb-8">
       <div style={{ fontFamily: "Fraunces, serif", fontSize: 26, fontWeight: 600, color: TEXT }} className="mb-1">Tasks</div>
-      <div style={{ color: MUTED, fontSize: 13 }} className="mb-5">Every task starts as a long-term to-do. Flip Daily to have it show up each day.</div>
+      <div style={{ color: MUTED, fontSize: 13 }} className="mb-5">New tasks default to your Daily checklist — flip Daily off if it's a long-term to-do instead.</div>
       {tasks.length === 0 ? (
         <EmptyState message="No tasks yet." cta="Add one" onClick={onAddClick} />
       ) : (
@@ -552,6 +554,8 @@ function ManageView({ tasks, categories, onAddClick, onEditClick, onToggleDaily,
       <button onClick={onAddCategory} className="w-full py-3 rounded-xl flex items-center justify-center gap-2" style={{ background: SURFACE, border: `1px solid ${BORDER}`, color: TEXT }}>
         + Add category
       </button>
+
+      <InstallSection iosMode={iosMode} onInstallClick={onInstallClick} message={installMsg} />
     </div>
   );
 }
@@ -662,7 +666,7 @@ function ProjectFormSheet({ sheet, onCancel, onSubmit, onDelete }) {
   const [name, setName] = useState(initial.name);
   const [color, setColor] = useState(initial.color);
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center" style={{ background: "rgba(0,0,0,0.55)" }} onClick={onCancel}>
+    <div className="fixed inset-0 z-50 flex items-end justify-center" style={{ background: "rgba(0,0,0,0.55)" }}>
       <div onClick={(e) => e.stopPropagation()} className="w-full rounded-t-3xl p-5" style={{ maxWidth: 430, background: SURFACE }}>
         <div className="flex justify-between items-center mb-4">
           <div style={{ fontFamily: "Fraunces, serif", fontSize: 18, fontWeight: 600, color: TEXT }}>{isEdit ? "Edit project" : "New project"}</div>
@@ -693,7 +697,7 @@ function ItemFormSheet({ sheet, onCancel, onSubmit, onDelete }) {
   const [name, setName] = useState(initial.name);
   const [date, setDate] = useState(initial.date || "");
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center" style={{ background: "rgba(0,0,0,0.55)" }} onClick={onCancel}>
+    <div className="fixed inset-0 z-50 flex items-end justify-center" style={{ background: "rgba(0,0,0,0.55)" }}>
       <div onClick={(e) => e.stopPropagation()} className="w-full rounded-t-3xl p-5" style={{ maxWidth: 430, background: SURFACE }}>
         <div className="flex justify-between items-center mb-4">
           <div style={{ fontFamily: "Fraunces, serif", fontSize: 18, fontWeight: 600, color: TEXT }}>{isEdit ? "Edit to-do" : "Add to-do"}</div>
@@ -768,7 +772,7 @@ function DayDetailSheet({ dateKeyStr, data, categories, onClose, onTap, onRemove
 function TaskFormSheet({ sheet, categories, onCancel, onSubmitTask, onSubmitOneOff, onDelete }) {
   const isDayAdd = sheet.context === "day-add";
   const isEdit = sheet.context === "edit";
-  const initial = sheet.initial || { name: "", category: categories[0]?.id, isDaily: false, weekdays: [0, 1, 2, 3, 4, 5, 6], targetCount: 1, remind: false, remindFrom: "09:00", remindTo: "18:00", oneTime: false };
+  const initial = sheet.initial || { name: "", category: categories[0]?.id, isDaily: true, weekdays: [0, 1, 2, 3, 4, 5, 6], targetCount: 1, remind: false, remindFrom: "09:00", remindTo: "18:00", oneTime: false };
   const [name, setName] = useState(initial.name);
   const [category, setCategory] = useState(initial.category);
   const [isDaily, setIsDaily] = useState(initial.isDaily ?? false);
@@ -796,7 +800,7 @@ function TaskFormSheet({ sheet, categories, onCancel, onSubmitTask, onSubmitOneO
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center" style={{ background: "rgba(0,0,0,0.55)" }} onClick={onCancel}>
+    <div className="fixed inset-0 z-50 flex items-end justify-center" style={{ background: "rgba(0,0,0,0.55)" }}>
       <div onClick={(e) => e.stopPropagation()} className="w-full rounded-t-3xl p-5" style={{ maxWidth: 430, background: SURFACE, maxHeight: "88vh", overflowY: "auto" }}>
         <div className="flex justify-between items-center mb-4">
           <div style={{ fontFamily: "Fraunces, serif", fontSize: 18, fontWeight: 600, color: TEXT }}>{isEdit ? "Edit task" : isDayAdd ? "Add task for this day" : "Add a task"}</div>
@@ -891,7 +895,7 @@ function CategoryFormSheet({ sheet, inUse, onCancel, onSubmit, onDelete }) {
   const [color, setColor] = useState(initial.color);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center" style={{ background: "rgba(0,0,0,0.55)" }} onClick={onCancel}>
+    <div className="fixed inset-0 z-50 flex items-end justify-center" style={{ background: "rgba(0,0,0,0.55)" }}>
       <div onClick={(e) => e.stopPropagation()} className="w-full rounded-t-3xl p-5" style={{ maxWidth: 430, background: SURFACE }}>
         <div className="flex justify-between items-center mb-4">
           <div style={{ fontFamily: "Fraunces, serif", fontSize: 18, fontWeight: 600, color: TEXT }}>{isEdit ? "Edit category" : "Add category"}</div>
@@ -939,7 +943,7 @@ function App() {
   const [itemSheet, setItemSheet] = useState(null);
   const [notifPermission, setNotifPermission] = useState(typeof Notification !== "undefined" ? Notification.permission : "unsupported");
   const [installEvent, setInstallEvent] = useState(null);
-  const [showIOSHint, setShowIOSHint] = useState(false);
+  const [installMsg, setInstallMsg] = useState(null);
   const [celebration, setCelebration] = useState(null);
   const [todayKey, setTodayKey] = useState(dateKey(new Date()));
 
@@ -1035,20 +1039,23 @@ function App() {
     prevCompleteRef.current = isComplete;
   }, [data.dailyLogs, todayKey]);
 
-  // install prompt (Android/Chrome) + iOS manual-instructions fallback
+  // capture the native install prompt when the browser offers one (Android/Chrome/desktop)
   useEffect(() => {
-    if (isStandalone()) return;
     const handler = (e) => { e.preventDefault(); setInstallEvent(e); };
     window.addEventListener("beforeinstallprompt", handler);
-    if (isIOS()) setShowIOSHint(true);
     return () => window.removeEventListener("beforeinstallprompt", handler);
   }, []);
 
   const handleInstallClick = async () => {
-    if (!installEvent) return;
-    installEvent.prompt();
-    await installEvent.userChoice;
-    setInstallEvent(null);
+    if (isStandalone()) { setInstallMsg("Already installed — check your home screen."); return; }
+    if (installEvent) {
+      installEvent.prompt();
+      await installEvent.userChoice;
+      setInstallEvent(null);
+      setInstallMsg(null);
+      return;
+    }
+    setInstallMsg('Look for "Install app" or "Add to Home Screen" in your browser\'s menu (⋮ or the address bar).');
   };
 
   const handleSignIn = async () => {
@@ -1224,8 +1231,6 @@ function App() {
           <>
             <AccountBar user={authUser} onSignOut={handleSignOut} />
             {needsNotifPermission && <NotifBanner onEnable={handleEnableNotifications} />}
-            {installEvent && <InstallBanner mode="prompt" onInstall={handleInstallClick} />}
-            {!installEvent && showIOSHint && <InstallBanner mode="ios" onDismiss={() => setShowIOSHint(false)} />}
             <div className="flex-1 overflow-y-auto">
               {view === "today" && <TodayView data={data} todayKey={todayKey} categories={data.categories} onTap={(id) => handleTapTask(todayKey, id)} onRemove={(id) => handleRemove(todayKey, id)} onOpenAdd={() => openSheet("add")} />}
               {view === "calendar" && <CalendarView data={data} categories={data.categories} monthDate={monthDate} setMonthDate={setMonthDate} onOpenDay={setDetailDateKey} />}
@@ -1246,6 +1251,7 @@ function App() {
                   onAddClick={() => openSheet("add")} onEditClick={(t) => openSheet("edit", t)}
                   onToggleDaily={handleToggleDaily} onToggleDone={handleToggleDone}
                   onAddCategory={() => openCategorySheet(null)} onEditCategory={(cat) => openCategorySheet(cat)}
+                  iosMode={isIOS()} onInstallClick={handleInstallClick} installMsg={installMsg}
                 />
               )}
             </div>
