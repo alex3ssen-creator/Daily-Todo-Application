@@ -139,7 +139,8 @@ function migrate(raw) {
   const categories = raw.categories && raw.categories.length ? raw.categories : DEFAULT_CATEGORIES;
   const projects = raw.projects || [];
   const projectItems = raw.projectItems || [];
-  return { tasks: tasks.map(normalizeTask), dailyLogs, categories, projects, projectItems };
+  const somedayLabel = raw.somedayLabel || "Someday";
+  return { tasks: tasks.map(normalizeTask), dailyLogs, categories, projects, projectItems, somedayLabel };
 }
 
 function generateIfNeeded(data, key) {
@@ -508,13 +509,13 @@ function CategoryRow({ cat, onEdit }) {
   );
 }
 
-function ManageView({ tasks, categories, onAddClick, onEditClick, onToggleDaily, onToggleDone, onAddCategory, onEditCategory, iosMode, onInstallClick, installMsg }) {
+function ManageView({ tasks, categories, somedayLabel, onEditSomedayLabel, onAddClick, onEditClick, onToggleDaily, onToggleDone, onAddCategory, onEditCategory, iosMode, onInstallClick, installMsg }) {
   const dailyTasks = tasks.filter((t) => t.isDaily);
-  const longTermTasks = tasks.filter((t) => !t.isDaily);
+  const somedayTasks = tasks.filter((t) => !t.isDaily);
   return (
     <div className="px-5 pt-6 pb-8">
       <div style={{ fontFamily: "Fraunces, serif", fontSize: 26, fontWeight: 600, color: TEXT }} className="mb-1">Tasks</div>
-      <div style={{ color: MUTED, fontSize: 13 }} className="mb-5">New tasks default to your Daily checklist — flip Daily off if it's a long-term to-do instead.</div>
+      <div style={{ color: MUTED, fontSize: 13 }} className="mb-5">New tasks default to your Daily checklist — flip Daily off to send it to {somedayLabel} instead.</div>
       {tasks.length === 0 ? (
         <EmptyState message="No tasks yet." cta="Add one" onClick={onAddClick} />
       ) : (
@@ -530,12 +531,15 @@ function ManageView({ tasks, categories, onAddClick, onEditClick, onToggleDaily,
             </div>
           )}
           <div className="mb-5">
-            <div style={{ fontSize: 11, color: MUTED, letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 8 }}>Long-term</div>
-            {longTermTasks.length === 0 ? (
+            <div className="flex items-center gap-2 mb-2">
+              <span style={{ fontSize: 11, color: MUTED, letterSpacing: 0.5, textTransform: "uppercase" }}>{somedayLabel}</span>
+              <button onClick={onEditSomedayLabel} style={{ color: MUTED, fontSize: 12 }}>✎</button>
+            </div>
+            {somedayTasks.length === 0 ? (
               <div style={{ color: MUTED, fontSize: 13 }}>Nothing here right now.</div>
             ) : (
               <div className="space-y-2">
-                {longTermTasks.map((t) => (
+                {somedayTasks.map((t) => (
                   <TaskManageRow key={t.id} task={t} categories={categories} onEdit={() => onEditClick(t)} onToggleDaily={() => onToggleDaily(t.id)} onToggleDone={() => onToggleDone(t.id)} />
                 ))}
               </div>
@@ -556,6 +560,24 @@ function ManageView({ tasks, categories, onAddClick, onEditClick, onToggleDaily,
       </button>
 
       <InstallSection iosMode={iosMode} onInstallClick={onInstallClick} message={installMsg} />
+    </div>
+  );
+}
+
+function LabelFormSheet({ initialLabel, onCancel, onSubmit }) {
+  const [label, setLabel] = useState(initialLabel);
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center" style={{ background: "rgba(0,0,0,0.55)" }}>
+      <div className="w-full rounded-t-3xl p-5" style={{ maxWidth: 430, background: SURFACE }}>
+        <div className="flex justify-between items-center mb-4">
+          <div style={{ fontFamily: "Fraunces, serif", fontSize: 18, fontWeight: 600, color: TEXT }}>Rename this list</div>
+          <button onClick={onCancel} style={{ color: MUTED, fontSize: 18 }}>×</button>
+        </div>
+        <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Section name" className="w-full px-4 py-3 rounded-xl mb-6" style={{ background: SURFACE2, color: TEXT, border: `1px solid ${BORDER}`, fontSize: 14 }} />
+        <button onClick={() => { if (!label.trim()) return; onSubmit(label.trim()); }} className="w-full py-3 rounded-xl" style={{ background: ACCENT, color: WHITE, fontWeight: 700, fontSize: 14 }}>
+          Save
+        </button>
+      </div>
     </div>
   );
 }
@@ -931,13 +953,14 @@ function App() {
   const [fb, setFb] = useState(null);
   const [authUser, setAuthUser] = useState(undefined);
   const [authError, setAuthError] = useState(null);
-  const [data, setData] = useState({ tasks: [], dailyLogs: {}, categories: DEFAULT_CATEGORIES, projects: [], projectItems: [] });
+  const [data, setData] = useState({ tasks: [], dailyLogs: {}, categories: DEFAULT_CATEGORIES, projects: [], projectItems: [], somedayLabel: "Someday" });
   const [loaded, setLoaded] = useState(false);
   const [view, setView] = useState("today");
   const [monthDate, setMonthDate] = useState(new Date());
   const [detailDateKey, setDetailDateKey] = useState(null);
   const [sheet, setSheet] = useState(null);
   const [categorySheet, setCategorySheet] = useState(null);
+  const [labelSheetOpen, setLabelSheetOpen] = useState(false);
   const [activeProjectId, setActiveProjectId] = useState(null);
   const [projectSheet, setProjectSheet] = useState(null);
   const [itemSheet, setItemSheet] = useState(null);
@@ -1063,7 +1086,7 @@ function App() {
     try { await fb.signInWithPopup(fb.auth, fb.provider); }
     catch (e) { setAuthError("Sign-in failed. Please try again."); console.error(e); }
   };
-  const handleSignOut = () => { fb.signOut(fb.auth); setData({ tasks: [], dailyLogs: {}, categories: DEFAULT_CATEGORIES, projects: [], projectItems: [] }); setLoaded(false); };
+  const handleSignOut = () => { fb.signOut(fb.auth); setData({ tasks: [], dailyLogs: {}, categories: DEFAULT_CATEGORIES, projects: [], projectItems: [], somedayLabel: "Someday" }); setLoaded(false); };
   const handleEnableNotifications = () => { Notification.requestPermission().then((p) => setNotifPermission(p)); };
 
   const openSheet = (context, initial = null) => setSheet({ context, initial });
@@ -1074,6 +1097,7 @@ function App() {
   const closeProjectSheet = () => setProjectSheet(null);
   const openItemSheet = (initial = null) => setItemSheet({ initial });
   const closeItemSheet = () => setItemSheet(null);
+  const handleRenameSomeday = (label) => { mutate((prev) => ({ ...prev, somedayLabel: label })); setLabelSheetOpen(false); };
 
   const handleTapTask = (dk, taskInstanceId) => mutate((prev) => ({
     ...prev,
@@ -1248,6 +1272,7 @@ function App() {
               {view === "manage" && (
                 <ManageView
                   tasks={data.tasks} categories={data.categories}
+                  somedayLabel={data.somedayLabel} onEditSomedayLabel={() => setLabelSheetOpen(true)}
                   onAddClick={() => openSheet("add")} onEditClick={(t) => openSheet("edit", t)}
                   onToggleDaily={handleToggleDaily} onToggleDone={handleToggleDone}
                   onAddCategory={() => openCategorySheet(null)} onEditCategory={(cat) => openCategorySheet(cat)}
@@ -1261,6 +1286,7 @@ function App() {
       </div>
       {sheet && <TaskFormSheet sheet={sheet} categories={data.categories} onCancel={closeSheet} onSubmitTask={onSubmitTask} onSubmitOneOff={onSubmitOneOff} onDelete={onDeleteFromSheet} />}
       {categorySheet && <CategoryFormSheet sheet={categorySheet} inUse={categoryInUse} onCancel={closeCategorySheet} onSubmit={onSubmitCategory} onDelete={onDeleteCategoryFromSheet} />}
+      {labelSheetOpen && <LabelFormSheet initialLabel={data.somedayLabel} onCancel={() => setLabelSheetOpen(false)} onSubmit={handleRenameSomeday} />}
       {projectSheet && <ProjectFormSheet sheet={projectSheet} onCancel={closeProjectSheet} onSubmit={onSubmitProject} onDelete={onDeleteProjectFromSheet} />}
       {itemSheet && <ItemFormSheet sheet={itemSheet} onCancel={closeItemSheet} onSubmit={onSubmitItem} onDelete={onDeleteItemFromSheet} />}
       {detailDateKey && (
