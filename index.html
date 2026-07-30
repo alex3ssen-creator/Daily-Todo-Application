@@ -989,28 +989,28 @@ function App() {
     const ref = fb.doc(fb.db, DOC_COLLECTION, authUser.uid);
     const unsub = fb.onSnapshot(
       ref,
-      async (snap) => {
+      (snap) => {
         let raw = { tasks: [], dailyLogs: {} };
         const existingRaw = snap.exists() ? snap.data().data : null;
         if (existingRaw) { try { raw = JSON.parse(existingRaw); } catch (e) {} }
         const migrated = migrate(raw);
-        const withToday = generateIfNeeded(migrated, dateKey(new Date()));
-        setData(withToday);
+        setData(migrated);
         setLoaded(true);
-        const serialized = JSON.stringify(withToday);
-        if (serialized !== existingRaw) {
-          try { await fb.setDoc(ref, { data: serialized, updatedAt: Date.now() }); } catch (e) { console.error("Sync failed", e); }
-        }
       },
       (err) => { console.error("Snapshot error", err); setLoaded(true); }
     );
     return () => unsub();
   }, [fb, authUser]);
 
+  const loadedRef = useRef(false);
+  useEffect(() => { loadedRef.current = loaded; }, [loaded]);
+
   const mutate = useCallback((updater) => {
     setData((prev) => {
       const next = updater(prev);
-      if (fb && authUser) {
+      // never write until we've confirmed the real data has loaded at least once —
+      // writing before that is what could overwrite real data with an empty default
+      if (fb && authUser && loadedRef.current) {
         const ref = fb.doc(fb.db, DOC_COLLECTION, authUser.uid);
         fb.setDoc(ref, { data: JSON.stringify(next), updatedAt: Date.now() }).catch((e) => console.error("Save failed", e));
       }
@@ -1027,8 +1027,9 @@ function App() {
     return () => clearInterval(interval);
   }, []);
   useEffect(() => {
+    if (!loaded) return;
     mutate((prev) => generateIfNeeded(prev, todayKey));
-  }, [todayKey]);
+  }, [todayKey, loaded]);
 
   // notifications for daily tasks with reminders on, while this tab stays open
   useEffect(() => {
