@@ -28,7 +28,7 @@
     getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged
   } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-auth.js";
   import {
-    getFirestore, doc, getDoc, setDoc, onSnapshot
+    getFirestore, doc, getDoc, setDoc, onSnapshot, collection, query, where, addDoc, updateDoc, deleteDoc, arrayUnion
   } from "https://www.gstatic.com/firebasejs/12.16.0/firebase-firestore.js";
 
   const firebaseConfig = {
@@ -46,7 +46,10 @@
   const db = getFirestore(app);
   const provider = new GoogleAuthProvider();
 
-  window.fb = { auth, db, provider, signInWithPopup, signOut, onAuthStateChanged, doc, getDoc, setDoc, onSnapshot };
+  window.fb = {
+    auth, db, provider, signInWithPopup, signOut, onAuthStateChanged,
+    doc, getDoc, setDoc, onSnapshot, collection, query, where, addDoc, updateDoc, deleteDoc, arrayUnion
+  };
   window.dispatchEvent(new Event("fb-ready"));
 
   if ("serviceWorker" in navigator) {
@@ -89,6 +92,8 @@ const CELEBRATION_MESSAGES = [
 ];
 
 const DOC_COLLECTION = "trackers";
+const SHARED_PROJECTS_COLLECTION = "sharedProjects";
+const SENT_TASKS_COLLECTION = "sentTasks";
 
 /* ---------- helpers ---------- */
 const pad = (n) => String(n).padStart(2, "0");
@@ -98,6 +103,7 @@ const normalizeWeekdays = (w) => (w && w.length ? w : [0, 1, 2, 3, 4, 5, 6]);
 const normalizeTask = (t) => ({ targetCount: 1, remind: false, remindFrom: "09:00", remindTo: "18:00", oneTime: false, ...t });
 const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent) && !window.MSStream;
 const isStandalone = () => window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
+const emailShort = (email) => (email ? email.split("@")[0] : "");
 
 function hexToRgba(hex, alpha) {
   const c = hex.replace("#", "");
@@ -321,7 +327,7 @@ function SignInScreen({ onSignIn, error }) {
   );
 }
 
-function AccountBar({ user, onSignOut }) {
+function AccountBar({ user, onSignOut, inboxCount, onOpenInbox }) {
   return (
     <div className="flex items-center justify-between px-5 py-3" style={{ borderBottom: `1px solid ${BORDER}` }}>
       <div className="flex items-center gap-2 min-w-0">
@@ -330,7 +336,17 @@ function AccountBar({ user, onSignOut }) {
           {user.displayName || user.email}
         </span>
       </div>
-      <button onClick={onSignOut} style={{ fontSize: 12, color: MUTED, flexShrink: 0 }}>Sign out</button>
+      <div className="flex items-center gap-4 flex-shrink-0">
+        <button onClick={onOpenInbox} style={{ position: "relative", color: TEXT, fontSize: 16 }}>
+          ✉
+          {inboxCount > 0 && (
+            <span style={{ position: "absolute", top: -6, right: -8, background: ACCENT, color: WHITE, fontSize: 9, fontWeight: 700, borderRadius: 999, minWidth: 15, height: 15, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 3px" }}>
+              {inboxCount}
+            </span>
+          )}
+        </button>
+        <button onClick={onSignOut} style={{ fontSize: 12, color: MUTED }}>Sign out</button>
+      </div>
     </div>
   );
 }
@@ -362,6 +378,89 @@ function InstallSection({ iosMode, onInstallClick, message }) {
           {message && <div style={{ fontSize: 11, color: MUTED, marginTop: 8, textAlign: "center" }}>{message}</div>}
         </>
       )}
+    </div>
+  );
+}
+
+function BackupSection({ onExport }) {
+  return (
+    <div className="mt-8">
+      <div style={{ fontSize: 11, color: MUTED, letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 8 }}>Backup</div>
+      <button onClick={onExport} className="w-full py-3 rounded-xl flex items-center justify-center gap-2" style={{ background: SURFACE, border: `1px solid ${BORDER}`, color: TEXT }}>
+        + Download my data
+      </button>
+      <div style={{ fontSize: 11, color: MUTED, marginTop: 8 }}>Saves a copy of everything on your device — worth doing every so often.</div>
+    </div>
+  );
+}
+
+function InboxItemRow({ item, onAccept, onDecline }) {
+  return (
+    <div className="flex items-center gap-3 py-2.5 px-3 rounded-xl" style={{ background: SURFACE2 }}>
+      <div className="flex-1 min-w-0">
+        <div style={{ fontSize: 14, color: TEXT }}>{item.name}</div>
+        <div style={{ fontSize: 11, color: MUTED }}>from {emailShort(item.fromEmail)}</div>
+      </div>
+      <button onClick={onDecline} style={{ color: MUTED, fontSize: 13 }}>Decline</button>
+      <button onClick={onAccept} style={{ color: ACCENT, fontSize: 13, fontWeight: 700 }}>Accept</button>
+    </div>
+  );
+}
+
+function InboxSheet({ items, categories, onClose, onAccept, onDecline, onSend }) {
+  const [composing, setComposing] = useState(false);
+  const [toEmail, setToEmail] = useState("");
+  const [name, setName] = useState("");
+  const [category, setCategory] = useState(categories[0]?.id);
+  const [sent, setSent] = useState(false);
+
+  const submit = () => {
+    if (!toEmail.trim() || !name.trim()) return;
+    onSend({ toEmail: toEmail.trim(), name: name.trim(), category });
+    setSent(true);
+    setToEmail(""); setName("");
+    setTimeout(() => setSent(false), 2500);
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center" style={{ background: "rgba(0,0,0,0.55)" }}>
+      <div onClick={(e) => e.stopPropagation()} className="w-full rounded-t-3xl p-5" style={{ maxWidth: 430, background: SURFACE, maxHeight: "85vh", overflowY: "auto" }}>
+        <div className="flex justify-between items-center mb-4">
+          <div style={{ fontFamily: "Fraunces, serif", fontSize: 18, fontWeight: 600, color: TEXT }}>Inbox</div>
+          <button onClick={onClose} style={{ color: MUTED, fontSize: 18 }}>×</button>
+        </div>
+
+        <div style={{ fontSize: 11, color: MUTED, letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 8 }}>Sent to you</div>
+        {items.length === 0 ? (
+          <div style={{ fontSize: 13, color: MUTED, marginBottom: 20 }}>Nothing waiting right now.</div>
+        ) : (
+          <div className="space-y-2 mb-6">
+            {items.map((it) => (<InboxItemRow key={it.id} item={it} onAccept={() => onAccept(it)} onDecline={() => onDecline(it.id)} />))}
+          </div>
+        )}
+
+        {!composing ? (
+          <button onClick={() => setComposing(true)} className="w-full py-3 rounded-xl flex items-center justify-center gap-2" style={{ background: SURFACE2, border: `1px solid ${BORDER}`, color: TEXT }}>
+            + Send someone a to-do
+          </button>
+        ) : (
+          <div className="mt-2">
+            <div style={{ fontSize: 11, color: MUTED, letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 8 }}>Send a to-do</div>
+            <input value={toEmail} onChange={(e) => setToEmail(e.target.value)} placeholder="their@email.com" className="w-full px-4 py-3 rounded-xl mb-3" style={{ background: SURFACE2, color: TEXT, border: `1px solid ${BORDER}`, fontSize: 14 }} />
+            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Task name" className="w-full px-4 py-3 rounded-xl mb-3" style={{ background: SURFACE2, color: TEXT, border: `1px solid ${BORDER}`, fontSize: 14 }} />
+            <div className="flex flex-wrap gap-2 mb-4">
+              {categories.map((cat) => (
+                <button key={cat.id} onClick={() => setCategory(cat.id)} className="px-3 py-2 rounded-full flex items-center gap-2" style={{ border: `1.5px solid ${category === cat.id ? cat.color : BORDER}`, background: category === cat.id ? hexToRgba(cat.color, 0.15) : "transparent" }}>
+                  <span style={{ width: 8, height: 8, borderRadius: "50%", background: cat.color }} />
+                  <span style={{ fontSize: 12, color: TEXT }}>{cat.label}</span>
+                </button>
+              ))}
+            </div>
+            <button onClick={submit} className="w-full py-3 rounded-xl" style={{ background: ACCENT, color: WHITE, fontWeight: 700, fontSize: 14 }}>Send</button>
+            {sent && <div style={{ fontSize: 12, color: ACCENT, textAlign: "center", marginTop: 8 }}>Sent!</div>}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -509,7 +608,7 @@ function CategoryRow({ cat, onEdit }) {
   );
 }
 
-function ManageView({ tasks, categories, somedayLabel, onEditSomedayLabel, onAddClick, onEditClick, onToggleDaily, onToggleDone, onAddCategory, onEditCategory, iosMode, onInstallClick, installMsg }) {
+function ManageView({ tasks, categories, somedayLabel, onEditSomedayLabel, onAddClick, onEditClick, onToggleDaily, onToggleDone, onAddCategory, onEditCategory, iosMode, onInstallClick, installMsg, onExport }) {
   const dailyTasks = tasks.filter((t) => t.isDaily);
   const somedayTasks = tasks.filter((t) => !t.isDaily);
   return (
@@ -560,6 +659,7 @@ function ManageView({ tasks, categories, somedayLabel, onEditSomedayLabel, onAdd
       </button>
 
       <InstallSection iosMode={iosMode} onInstallClick={onInstallClick} message={installMsg} />
+      <BackupSection onExport={onExport} />
     </div>
   );
 }
@@ -590,7 +690,10 @@ function ProjectCard({ project, items, onOpen }) {
     <button onClick={onOpen} className="w-full flex items-center gap-3 py-3 px-3 rounded-xl text-left" style={{ background: SURFACE }}>
       <span style={{ width: 12, height: 12, borderRadius: "50%", background: project.color, flexShrink: 0 }} />
       <div className="flex-1 min-w-0">
-        <div style={{ fontSize: 15, color: TEXT }}>{project.name}</div>
+        <div className="flex items-center gap-2">
+          <span style={{ fontSize: 15, color: TEXT }}>{project.name}</span>
+          {project.isShared && <span style={{ fontSize: 10, color: ACCENT, border: `1px solid ${ACCENT}`, borderRadius: 999, padding: "1px 6px" }}>Shared</span>}
+        </div>
         <div style={{ fontSize: 11, color: MUTED }}>{total ? `${done}/${total} done` : "No to-dos yet"}</div>
       </div>
       <span style={{ fontFamily: '"IBM Plex Mono", monospace', fontSize: 12, color: MUTED, flexShrink: 0 }}>{pct === null ? "–" : `${pct}%`}</span>
@@ -598,18 +701,18 @@ function ProjectCard({ project, items, onOpen }) {
   );
 }
 
-function ProjectsListView({ projects, projectItems, onOpenProject, onAddProject }) {
+function ProjectsListView({ projects, onOpenProject, onAddProject }) {
   return (
     <div className="px-5 pt-6 pb-8">
       <div style={{ fontFamily: "Fraunces, serif", fontSize: 26, fontWeight: 600, color: TEXT }} className="mb-1">Projects</div>
-      <div style={{ color: MUTED, fontSize: 13 }} className="mb-5">Separate to-do lists for bigger goals — training plans, events, anything with its own steps.</div>
+      <div style={{ color: MUTED, fontSize: 13 }} className="mb-5">Separate to-do lists for bigger goals — training plans, events, anything with its own steps. Share one to work on it together.</div>
       {projects.length === 0 ? (
         <EmptyState message="No projects yet." cta="New project" onClick={onAddProject} />
       ) : (
         <>
           <div className="space-y-2 mb-4">
             {projects.map((p) => (
-              <ProjectCard key={p.id} project={p} items={projectItems.filter((i) => i.projectId === p.id)} onOpen={() => onOpenProject(p.id)} />
+              <ProjectCard key={p.id} project={p} items={p.items} onOpen={() => onOpenProject(p.id)} />
             ))}
           </div>
           <button onClick={onAddProject} className="w-full py-3 rounded-xl flex items-center justify-center gap-2" style={{ background: SURFACE, border: `1px solid ${BORDER}`, color: TEXT }}>
@@ -632,8 +735,15 @@ function ProjectItemRow({ item, onToggle, onEdit }) {
       }}>
         {item.done && <span style={{ color: WHITE, fontSize: 13, fontWeight: 800 }}>✓</span>}
       </button>
-      <span style={{ flex: 1, fontSize: 14, textDecoration: item.done ? "line-through" : "none", color: item.done ? MUTED : TEXT }}>{item.name}</span>
-      <button onClick={onEdit} style={{ color: MUTED, fontSize: 13 }}>✎</button>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 14, textDecoration: item.done ? "line-through" : "none", color: item.done ? MUTED : TEXT }}>{item.name}</div>
+        {(item.assignee || item.doneBy) && (
+          <div style={{ fontSize: 11, color: MUTED }}>
+            {item.done && item.doneBy ? `✓ done by ${emailShort(item.doneBy)}` : item.assignee ? `assigned to ${emailShort(item.assignee)}` : ""}
+          </div>
+        )}
+      </div>
+      <button onClick={onEdit} style={{ color: MUTED, fontSize: 13, flexShrink: 0 }}>✎</button>
     </div>
   );
 }
@@ -653,7 +763,13 @@ function ProjectDetailView({ project, items, onBack, onEditProject, onAddItem, o
         <div style={{ fontFamily: "Fraunces, serif", fontSize: 22, fontWeight: 600, color: TEXT, flex: 1 }}>{project.name}</div>
         <button onClick={onEditProject} style={{ color: MUTED, fontSize: 14 }}>✎</button>
       </div>
-      <div style={{ fontSize: 12, color: MUTED, marginBottom: 20, marginLeft: 26 }}>{total ? `${done}/${total} complete` : "No to-dos yet"}</div>
+      <div style={{ fontSize: 12, color: MUTED, marginBottom: 8, marginLeft: 26 }}>{total ? `${done}/${total} complete` : "No to-dos yet"}</div>
+      {project.isShared && (
+        <div style={{ fontSize: 11, color: MUTED, marginBottom: 20, marginLeft: 26 }}>
+          With: {project.memberEmails.map((e) => emailShort(e)).join(", ")}
+        </div>
+      )}
+      {!project.isShared && <div style={{ marginBottom: 12 }} />}
       {unscheduled.length > 0 && (
         <div className="mb-5">
           <div style={{ fontSize: 11, color: MUTED, letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 8 }}>To-do</div>
@@ -682,14 +798,29 @@ function ProjectDetailView({ project, items, onBack, onEditProject, onAddItem, o
   );
 }
 
-function ProjectFormSheet({ sheet, onCancel, onSubmit, onDelete }) {
+function ProjectFormSheet({ sheet, myEmail, onCancel, onSubmit, onDelete, onInvite }) {
   const isEdit = !!sheet.initial;
   const initial = sheet.initial || { name: "", color: PROJECT_COLORS[0] };
   const [name, setName] = useState(initial.name);
   const [color, setColor] = useState(initial.color);
+  const [shared, setShared] = useState(initial.isShared ?? false);
+  const [emailsText, setEmailsText] = useState("");
+  const [inviteText, setInviteText] = useState("");
+
+  const submit = () => {
+    if (!name.trim()) return;
+    if (isEdit) { onSubmit({ name: name.trim(), color }, initial.id); return; }
+    if (shared) {
+      const invites = emailsText.split(",").map((e) => e.trim()).filter(Boolean);
+      onSubmit({ name: name.trim(), color, isShared: true, memberEmails: [myEmail, ...invites] }, null);
+    } else {
+      onSubmit({ name: name.trim(), color, isShared: false }, null);
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center" style={{ background: "rgba(0,0,0,0.55)" }}>
-      <div onClick={(e) => e.stopPropagation()} className="w-full rounded-t-3xl p-5" style={{ maxWidth: 430, background: SURFACE }}>
+      <div onClick={(e) => e.stopPropagation()} className="w-full rounded-t-3xl p-5" style={{ maxWidth: 430, background: SURFACE, maxHeight: "88vh", overflowY: "auto" }}>
         <div className="flex justify-between items-center mb-4">
           <div style={{ fontFamily: "Fraunces, serif", fontSize: 18, fontWeight: 600, color: TEXT }}>{isEdit ? "Edit project" : "New project"}</div>
           <button onClick={onCancel} style={{ color: MUTED, fontSize: 18 }}>×</button>
@@ -700,7 +831,34 @@ function ProjectFormSheet({ sheet, onCancel, onSubmit, onDelete }) {
             <button key={c} onClick={() => setColor(c)} style={{ width: 32, height: 32, borderRadius: "50%", background: c, border: color === c ? `2px solid ${WHITE}` : "2px solid transparent" }} />
           ))}
         </div>
-        <button onClick={() => { if (!name.trim()) return; onSubmit({ name: name.trim(), color }, isEdit ? initial.id : null); }} className="w-full py-3 rounded-xl mb-2" style={{ background: ACCENT, color: WHITE, fontWeight: 700, fontSize: 14 }}>
+
+        {!isEdit && (
+          <div className="flex items-center justify-between mb-4 px-1">
+            <div>
+              <div style={{ fontSize: 14, color: TEXT }}>Share with others</div>
+              <div style={{ fontSize: 11, color: MUTED }}>Everyone can see who's assigned and who's finished what</div>
+            </div>
+            <Toggle on={shared} onClick={() => setShared((v) => !v)} />
+          </div>
+        )}
+        {!isEdit && shared && (
+          <div className="mb-6">
+            <div style={{ fontSize: 12, color: MUTED, marginBottom: 6 }}>Invite by email (comma-separated)</div>
+            <input value={emailsText} onChange={(e) => setEmailsText(e.target.value)} placeholder="friend@gmail.com, other@gmail.com" className="w-full px-4 py-3 rounded-xl" style={{ background: SURFACE2, color: TEXT, border: `1px solid ${BORDER}`, fontSize: 14 }} />
+          </div>
+        )}
+
+        {isEdit && initial.isShared && (
+          <div className="mb-6">
+            <div style={{ fontSize: 12, color: MUTED, marginBottom: 6 }}>With: {initial.memberEmails.map((e) => emailShort(e)).join(", ")}</div>
+            <div className="flex gap-2">
+              <input value={inviteText} onChange={(e) => setInviteText(e.target.value)} placeholder="Add someone's email" className="flex-1 px-4 py-3 rounded-xl" style={{ background: SURFACE2, color: TEXT, border: `1px solid ${BORDER}`, fontSize: 14 }} />
+              <button onClick={() => { if (inviteText.trim()) { onInvite(initial.id, inviteText.trim()); setInviteText(""); } }} className="px-4 rounded-xl" style={{ background: SURFACE2, border: `1px solid ${BORDER}`, color: TEXT, fontSize: 13 }}>Add</button>
+            </div>
+          </div>
+        )}
+
+        <button onClick={submit} className="w-full py-3 rounded-xl mb-2" style={{ background: ACCENT, color: WHITE, fontWeight: 700, fontSize: 14 }}>
           {isEdit ? "Save changes" : "Create project"}
         </button>
         {isEdit && (
@@ -713,11 +871,12 @@ function ProjectFormSheet({ sheet, onCancel, onSubmit, onDelete }) {
   );
 }
 
-function ItemFormSheet({ sheet, onCancel, onSubmit, onDelete }) {
+function ItemFormSheet({ sheet, memberEmails, onCancel, onSubmit, onDelete }) {
   const isEdit = !!sheet.initial;
-  const initial = sheet.initial || { name: "", date: "" };
+  const initial = sheet.initial || { name: "", date: "", assignee: null };
   const [name, setName] = useState(initial.name);
   const [date, setDate] = useState(initial.date || "");
+  const [assignee, setAssignee] = useState(initial.assignee || "");
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center" style={{ background: "rgba(0,0,0,0.55)" }}>
       <div onClick={(e) => e.stopPropagation()} className="w-full rounded-t-3xl p-5" style={{ maxWidth: 430, background: SURFACE }}>
@@ -727,8 +886,19 @@ function ItemFormSheet({ sheet, onCancel, onSubmit, onDelete }) {
         </div>
         <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Easy run, 5km" className="w-full px-4 py-3 rounded-xl mb-4" style={{ background: SURFACE2, color: TEXT, border: `1px solid ${BORDER}`, fontSize: 14 }} />
         <div className="mb-2" style={{ fontSize: 12, color: MUTED }}>Date (optional)</div>
-        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="w-full px-3 py-2 rounded-lg mb-6" style={{ background: SURFACE2, color: TEXT, border: `1px solid ${BORDER}`, fontSize: 13 }} />
-        <button onClick={() => { if (!name.trim()) return; onSubmit({ name: name.trim(), date }, isEdit ? initial.id : null); }} className="w-full py-3 rounded-xl mb-2" style={{ background: ACCENT, color: WHITE, fontWeight: 700, fontSize: 14 }}>
+        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="w-full px-3 py-2 rounded-lg mb-5" style={{ background: SURFACE2, color: TEXT, border: `1px solid ${BORDER}`, fontSize: 13 }} />
+        {memberEmails && memberEmails.length > 0 && (
+          <div className="mb-6">
+            <div style={{ fontSize: 12, color: MUTED, marginBottom: 8 }}>Assign to</div>
+            <div className="flex flex-wrap gap-2">
+              <button onClick={() => setAssignee("")} className="px-3 py-2 rounded-full" style={{ border: `1.5px solid ${assignee === "" ? ACCENT : BORDER}`, background: assignee === "" ? hexToRgba(ACCENT, 0.15) : "transparent", color: TEXT, fontSize: 12 }}>Anyone</button>
+              {memberEmails.map((em) => (
+                <button key={em} onClick={() => setAssignee(em)} className="px-3 py-2 rounded-full" style={{ border: `1.5px solid ${assignee === em ? ACCENT : BORDER}`, background: assignee === em ? hexToRgba(ACCENT, 0.15) : "transparent", color: TEXT, fontSize: 12 }}>{emailShort(em)}</button>
+              ))}
+            </div>
+          </div>
+        )}
+        <button onClick={() => { if (!name.trim()) return; onSubmit({ name: name.trim(), date, assignee: assignee || null }, isEdit ? initial.id : null); }} className="w-full py-3 rounded-xl mb-2" style={{ background: ACCENT, color: WHITE, fontWeight: 700, fontSize: 14 }}>
           {isEdit ? "Save changes" : "Add to-do"}
         </button>
         {isEdit && (
@@ -955,6 +1125,7 @@ function App() {
   const [authError, setAuthError] = useState(null);
   const [data, setData] = useState({ tasks: [], dailyLogs: {}, categories: DEFAULT_CATEGORIES, projects: [], projectItems: [], somedayLabel: "Someday" });
   const [loaded, setLoaded] = useState(false);
+  const [syncError, setSyncError] = useState(false);
   const [view, setView] = useState("today");
   const [monthDate, setMonthDate] = useState(new Date());
   const [detailDateKey, setDetailDateKey] = useState(null);
@@ -969,6 +1140,9 @@ function App() {
   const [installMsg, setInstallMsg] = useState(null);
   const [celebration, setCelebration] = useState(null);
   const [todayKey, setTodayKey] = useState(dateKey(new Date()));
+  const [sharedProjects, setSharedProjects] = useState([]);
+  const [inboxItems, setInboxItems] = useState([]);
+  const [inboxOpen, setInboxOpen] = useState(false);
 
   const dataRef = useRef(data);
   useEffect(() => { dataRef.current = data; }, [data]);
@@ -986,6 +1160,7 @@ function App() {
   useEffect(() => {
     if (!fb || !authUser) return;
     setLoaded(false);
+    setSyncError(false);
     const ref = fb.doc(fb.db, DOC_COLLECTION, authUser.uid);
     const unsub = fb.onSnapshot(
       ref,
@@ -997,13 +1172,41 @@ function App() {
         setData(migrated);
         setLoaded(true);
       },
-      (err) => { console.error("Snapshot error", err); setLoaded(true); }
+      (err) => { console.error("Snapshot error", err); setSyncError(true); }
     );
     return () => unsub();
   }, [fb, authUser]);
 
   const loadedRef = useRef(false);
   useEffect(() => { loadedRef.current = loaded; }, [loaded]);
+
+  const myEmail = authUser?.email || null;
+
+  // live: any project shared with me
+  useEffect(() => {
+    if (!fb || !myEmail) { setSharedProjects([]); return; }
+    const q = fb.query(fb.collection(fb.db, SHARED_PROJECTS_COLLECTION), fb.where("memberEmails", "array-contains", myEmail));
+    const unsub = fb.onSnapshot(q, (snap) => {
+      const list = snap.docs.map((d) => {
+        const raw = d.data();
+        let payload = { name: "Untitled", color: PROJECT_COLORS[0], items: [] };
+        try { payload = JSON.parse(raw.payload); } catch (e) {}
+        return { id: d.id, isShared: true, ownerEmail: raw.ownerEmail, memberEmails: raw.memberEmails || [], name: payload.name, color: payload.color, items: payload.items || [] };
+      });
+      setSharedProjects(list);
+    }, (err) => console.error("Shared projects error", err));
+    return () => unsub();
+  }, [fb, myEmail]);
+
+  // live: to-dos someone has sent to me, still pending
+  useEffect(() => {
+    if (!fb || !myEmail) { setInboxItems([]); return; }
+    const q = fb.query(fb.collection(fb.db, SENT_TASKS_COLLECTION), fb.where("toEmail", "==", myEmail), fb.where("status", "==", "pending"));
+    const unsub = fb.onSnapshot(q, (snap) => {
+      setInboxItems(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+    }, (err) => console.error("Inbox error", err));
+    return () => unsub();
+  }, [fb, myEmail]);
 
   const mutate = useCallback((updater) => {
     setData((prev) => {
@@ -1089,6 +1292,17 @@ function App() {
   };
   const handleSignOut = () => { fb.signOut(fb.auth); setData({ tasks: [], dailyLogs: {}, categories: DEFAULT_CATEGORIES, projects: [], projectItems: [], somedayLabel: "Someday" }); setLoaded(false); };
   const handleEnableNotifications = () => { Notification.requestPermission().then((p) => setNotifPermission(p)); };
+  const handleExport = () => {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `ledger-backup-${todayKey}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
 
   const openSheet = (context, initial = null) => setSheet({ context, initial });
   const closeSheet = () => setSheet(null);
@@ -1200,10 +1414,63 @@ function App() {
   const handleAddProject = ({ name, color }) => mutate((prev) => ({ ...prev, projects: [...prev.projects, { id: uid("proj"), name, color }] }));
   const handleEditProject = (id, { name, color }) => mutate((prev) => ({ ...prev, projects: prev.projects.map((p) => (p.id === id ? { ...p, name, color } : p)) }));
   const handleDeleteProject = (id) => mutate((prev) => ({ ...prev, projects: prev.projects.filter((p) => p.id !== id), projectItems: prev.projectItems.filter((it) => it.projectId !== id) }));
-  const handleAddItem = (projectId, { name, date }) => mutate((prev) => ({ ...prev, projectItems: [...prev.projectItems, { id: uid("pit"), projectId, name, date: date || null, done: false }] }));
-  const handleEditItem = (id, { name, date }) => mutate((prev) => ({ ...prev, projectItems: prev.projectItems.map((it) => (it.id === id ? { ...it, name, date: date || null } : it)) }));
+  const handleAddItem = (projectId, { name, date, assignee }) => mutate((prev) => ({ ...prev, projectItems: [...prev.projectItems, { id: uid("pit"), projectId, name, date: date || null, done: false, assignee: assignee || null, doneBy: null }] }));
+  const handleEditItem = (id, { name, date, assignee }) => mutate((prev) => ({ ...prev, projectItems: prev.projectItems.map((it) => (it.id === id ? { ...it, name, date: date || null, assignee: assignee || null } : it)) }));
   const handleDeleteItem = (id) => mutate((prev) => ({ ...prev, projectItems: prev.projectItems.filter((it) => it.id !== id) }));
-  const handleToggleItem = (id) => mutate((prev) => ({ ...prev, projectItems: prev.projectItems.map((it) => (it.id === id ? { ...it, done: !it.done } : it)) }));
+  const handleToggleItem = (id) => mutate((prev) => ({ ...prev, projectItems: prev.projectItems.map((it) => (it.id === id ? { ...it, done: !it.done, doneBy: !it.done ? myEmail : null } : it)) }));
+
+  // shared projects live in their own Firestore collection so every member sees live updates
+  const sharedProjectRef = (id) => fb.doc(fb.db, SHARED_PROJECTS_COLLECTION, id);
+  const writeSharedPayload = (id, memberEmails, ownerEmail, payload) =>
+    fb.setDoc(sharedProjectRef(id), { memberEmails, ownerEmail, payload: JSON.stringify(payload), updatedAt: Date.now() }).catch((e) => console.error("Shared project save failed", e));
+
+  const handleCreateSharedProject = ({ name, color, memberEmails }) => {
+    fb.addDoc(fb.collection(fb.db, SHARED_PROJECTS_COLLECTION), {
+      memberEmails, ownerEmail: myEmail, payload: JSON.stringify({ name, color, items: [] }), updatedAt: Date.now(),
+    }).catch((e) => console.error("Create shared project failed", e));
+  };
+  const handleEditSharedProject = (id, { name, color }) => {
+    const p = sharedProjects.find((sp) => sp.id === id);
+    if (!p) return;
+    writeSharedPayload(id, p.memberEmails, p.ownerEmail, { name, color, items: p.items });
+  };
+  const handleDeleteSharedProject = (id) => { fb.deleteDoc(sharedProjectRef(id)).catch((e) => console.error("Delete shared project failed", e)); };
+  const handleInviteToSharedProject = (id, email) => { fb.updateDoc(sharedProjectRef(id), { memberEmails: fb.arrayUnion(email) }).catch((e) => console.error("Invite failed", e)); };
+  const handleAddSharedItem = (projectId, { name, date, assignee }) => {
+    const p = sharedProjects.find((sp) => sp.id === projectId);
+    if (!p) return;
+    const items = [...p.items, { id: uid("pit"), name, date: date || null, done: false, assignee: assignee || null, doneBy: null }];
+    writeSharedPayload(projectId, p.memberEmails, p.ownerEmail, { name: p.name, color: p.color, items });
+  };
+  const handleEditSharedItem = (projectId, itemId, { name, date, assignee }) => {
+    const p = sharedProjects.find((sp) => sp.id === projectId);
+    if (!p) return;
+    const items = p.items.map((it) => (it.id === itemId ? { ...it, name, date: date || null, assignee: assignee || null } : it));
+    writeSharedPayload(projectId, p.memberEmails, p.ownerEmail, { name: p.name, color: p.color, items });
+  };
+  const handleDeleteSharedItem = (projectId, itemId) => {
+    const p = sharedProjects.find((sp) => sp.id === projectId);
+    if (!p) return;
+    const items = p.items.filter((it) => it.id !== itemId);
+    writeSharedPayload(projectId, p.memberEmails, p.ownerEmail, { name: p.name, color: p.color, items });
+  };
+  const handleToggleSharedItem = (projectId, itemId) => {
+    const p = sharedProjects.find((sp) => sp.id === projectId);
+    if (!p) return;
+    const items = p.items.map((it) => (it.id === itemId ? { ...it, done: !it.done, doneBy: !it.done ? myEmail : null } : it));
+    writeSharedPayload(projectId, p.memberEmails, p.ownerEmail, { name: p.name, color: p.color, items });
+  };
+
+  // sending a to-do to someone else's account, and accepting/declining what's sent to you
+  const handleSendToInbox = ({ toEmail, name, category }) => {
+    fb.addDoc(fb.collection(fb.db, SENT_TASKS_COLLECTION), { toEmail, fromEmail: myEmail, name, category, status: "pending", createdAt: Date.now() })
+      .catch((e) => console.error("Send failed", e));
+  };
+  const handleAcceptInbox = (item) => {
+    handleAddTask({ name: item.name, category: item.category, isDaily: false, weekdays: [0, 1, 2, 3, 4, 5, 6], targetCount: 1, remind: false, remindFrom: "09:00", remindTo: "18:00", oneTime: true });
+    fb.deleteDoc(fb.doc(fb.db, SENT_TASKS_COLLECTION, item.id)).catch((e) => console.error("Accept cleanup failed", e));
+  };
+  const handleDeclineInbox = (id) => { fb.deleteDoc(fb.doc(fb.db, SENT_TASKS_COLLECTION, id)).catch((e) => console.error("Decline failed", e)); };
 
   const onSubmitOneOff = (payload) => {
     const dk = sheet.context === "day-add" ? detailDateKey : todayKey;
@@ -1223,22 +1490,46 @@ function App() {
   };
   const onDeleteCategoryFromSheet = (id) => { handleDeleteCategory(id); closeCategorySheet(); };
   const onSubmitProject = (payload, editId) => {
-    if (editId) handleEditProject(editId, payload);
-    else handleAddProject(payload);
+    if (editId) {
+      if (sharedProjects.some((p) => p.id === editId)) handleEditSharedProject(editId, payload);
+      else handleEditProject(editId, payload);
+    } else {
+      if (payload.isShared) handleCreateSharedProject(payload);
+      else handleAddProject(payload);
+    }
     closeProjectSheet();
   };
-  const onDeleteProjectFromSheet = (id) => { handleDeleteProject(id); setActiveProjectId(null); closeProjectSheet(); };
+  const onDeleteProjectFromSheet = (id) => {
+    if (sharedProjects.some((p) => p.id === id)) handleDeleteSharedProject(id);
+    else handleDeleteProject(id);
+    setActiveProjectId(null);
+    closeProjectSheet();
+  };
   const onSubmitItem = (payload, editId) => {
-    if (editId) handleEditItem(editId, payload);
-    else handleAddItem(activeProjectId, payload);
+    const isShared = sharedProjects.some((p) => p.id === activeProjectId);
+    if (editId) {
+      if (isShared) handleEditSharedItem(activeProjectId, editId, payload);
+      else handleEditItem(editId, payload);
+    } else {
+      if (isShared) handleAddSharedItem(activeProjectId, payload);
+      else handleAddItem(activeProjectId, payload);
+    }
     closeItemSheet();
   };
-  const onDeleteItemFromSheet = (id) => { handleDeleteItem(id); closeItemSheet(); };
+  const onDeleteItemFromSheet = (id) => {
+    if (sharedProjects.some((p) => p.id === activeProjectId)) handleDeleteSharedItem(activeProjectId, id);
+    else handleDeleteItem(id);
+    closeItemSheet();
+  };
 
   const checkingAuth = authUser === undefined;
   const needsNotifPermission = data.tasks.some((t) => t.remind) && notifPermission === "default";
   const categoryInUse = categorySheet?.initial ? data.tasks.some((t) => t.category === categorySheet.initial.id) : false;
-  const activeProject = data.projects.find((p) => p.id === activeProjectId) || null;
+  const allProjects = [
+    ...data.projects.map((p) => ({ ...p, isShared: false, items: data.projectItems.filter((i) => i.projectId === p.id) })),
+    ...sharedProjects,
+  ];
+  const activeProject = allProjects.find((p) => p.id === activeProjectId) || null;
 
   return (
     <div className="w-full flex justify-center" style={{ background: "#0B0E13", minHeight: "100vh" }}>
@@ -1247,14 +1538,19 @@ function App() {
           <div className="flex-1 flex items-center justify-center" style={{ color: MUTED, fontSize: 13 }}>Loading…</div>
         ) : !authUser ? (
           <SignInScreen onSignIn={handleSignIn} error={authError} />
+        ) : syncError ? (
+          <div className="flex-1 flex flex-col items-center justify-center px-8 text-center">
+            <div style={{ color: DANGER, fontSize: 14, marginBottom: 16 }}>Couldn't load your data. Nothing was changed — please check your connection and try again.</div>
+            <button onClick={() => window.location.reload()} className="px-5 py-2.5 rounded-xl" style={{ background: ACCENT, color: WHITE, fontSize: 13, fontWeight: 700 }}>Retry</button>
+          </div>
         ) : !loaded ? (
           <>
-            <AccountBar user={authUser} onSignOut={handleSignOut} />
+            <AccountBar user={authUser} onSignOut={handleSignOut} inboxCount={inboxItems.length} onOpenInbox={() => setInboxOpen(true)} />
             <div className="flex-1 flex items-center justify-center" style={{ color: MUTED, fontSize: 13 }}>Syncing…</div>
           </>
         ) : (
           <>
-            <AccountBar user={authUser} onSignOut={handleSignOut} />
+            <AccountBar user={authUser} onSignOut={handleSignOut} inboxCount={inboxItems.length} onOpenInbox={() => setInboxOpen(true)} />
             {needsNotifPermission && <NotifBanner onEnable={handleEnableNotifications} />}
             <div className="flex-1 overflow-y-auto">
               {view === "today" && <TodayView data={data} todayKey={todayKey} categories={data.categories} onTap={(id) => handleTapTask(todayKey, id)} onRemove={(id) => handleRemove(todayKey, id)} onOpenAdd={() => openSheet("add")} />}
@@ -1262,12 +1558,13 @@ function App() {
               {view === "projects" && (
                 activeProject ? (
                   <ProjectDetailView
-                    project={activeProject} items={data.projectItems.filter((i) => i.projectId === activeProject.id)}
+                    project={activeProject} items={activeProject.items}
                     onBack={() => setActiveProjectId(null)} onEditProject={() => openProjectSheet(activeProject)}
-                    onAddItem={() => openItemSheet(null)} onEditItem={(it) => openItemSheet(it)} onToggleItem={handleToggleItem}
+                    onAddItem={() => openItemSheet(null)} onEditItem={(it) => openItemSheet(it)}
+                    onToggleItem={(id) => (activeProject.isShared ? handleToggleSharedItem(activeProject.id, id) : handleToggleItem(id))}
                   />
                 ) : (
-                  <ProjectsListView projects={data.projects} projectItems={data.projectItems} onOpenProject={setActiveProjectId} onAddProject={() => openProjectSheet(null)} />
+                  <ProjectsListView projects={allProjects} onOpenProject={setActiveProjectId} onAddProject={() => openProjectSheet(null)} />
                 )
               )}
               {view === "manage" && (
@@ -1278,6 +1575,7 @@ function App() {
                   onToggleDaily={handleToggleDaily} onToggleDone={handleToggleDone}
                   onAddCategory={() => openCategorySheet(null)} onEditCategory={(cat) => openCategorySheet(cat)}
                   iosMode={isIOS()} onInstallClick={handleInstallClick} installMsg={installMsg}
+                  onExport={handleExport}
                 />
               )}
             </div>
@@ -1288,8 +1586,9 @@ function App() {
       {sheet && <TaskFormSheet sheet={sheet} categories={data.categories} onCancel={closeSheet} onSubmitTask={onSubmitTask} onSubmitOneOff={onSubmitOneOff} onDelete={onDeleteFromSheet} />}
       {categorySheet && <CategoryFormSheet sheet={categorySheet} inUse={categoryInUse} onCancel={closeCategorySheet} onSubmit={onSubmitCategory} onDelete={onDeleteCategoryFromSheet} />}
       {labelSheetOpen && <LabelFormSheet initialLabel={data.somedayLabel} onCancel={() => setLabelSheetOpen(false)} onSubmit={handleRenameSomeday} />}
-      {projectSheet && <ProjectFormSheet sheet={projectSheet} onCancel={closeProjectSheet} onSubmit={onSubmitProject} onDelete={onDeleteProjectFromSheet} />}
-      {itemSheet && <ItemFormSheet sheet={itemSheet} onCancel={closeItemSheet} onSubmit={onSubmitItem} onDelete={onDeleteItemFromSheet} />}
+      {projectSheet && <ProjectFormSheet sheet={projectSheet} myEmail={myEmail} onCancel={closeProjectSheet} onSubmit={onSubmitProject} onDelete={onDeleteProjectFromSheet} onInvite={handleInviteToSharedProject} />}
+      {itemSheet && <ItemFormSheet sheet={itemSheet} memberEmails={activeProject?.isShared ? activeProject.memberEmails : null} onCancel={closeItemSheet} onSubmit={onSubmitItem} onDelete={onDeleteItemFromSheet} />}
+      {inboxOpen && <InboxSheet items={inboxItems} categories={data.categories} onClose={() => setInboxOpen(false)} onAccept={handleAcceptInbox} onDecline={handleDeclineInbox} onSend={handleSendToInbox} />}
       {detailDateKey && (
         <DayDetailSheet dateKeyStr={detailDateKey} data={data} categories={data.categories} onClose={() => setDetailDateKey(null)} onTap={(id) => handleTapTask(detailDateKey, id)} onRemove={(id) => handleRemove(detailDateKey, id)} onOpenAdd={() => openSheet("day-add")} onGenerate={() => handleGenerateDay(detailDateKey)} />
       )}
