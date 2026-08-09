@@ -69,10 +69,26 @@
 <script type="text/babel">
 const { useState, useEffect, useRef, useCallback } = React;
 
-/* ---------- design tokens ---------- */
-const BG = "#14181F", SURFACE = "#1E2430", SURFACE2 = "#262E3D";
-const TEXT = "#E8E6DE", MUTED = "#8B93A3", BORDER = "#2E3646";
-const ACCENT = "#D4A24C", DANGER = "#C9705E", WHITE = "#FFFFFF";
+/* ---------- design tokens (mutable — reassigned by applyTheme) ---------- */
+let BG = "#14181F", SURFACE = "#1E2430", SURFACE2 = "#262E3D";
+let TEXT = "#E8E6DE", MUTED = "#8B93A3", BORDER = "#2E3646";
+let ACCENT = "#D4A24C";
+const DANGER = "#C9705E", WHITE = "#FFFFFF";
+
+const THEMES = [
+  { id: "ink-gold", label: "Ink & Gold", bg: "#14181F", surface: "#1E2430", surface2: "#262E3D", text: "#E8E6DE", muted: "#8B93A3", border: "#2E3646", accent: "#D4A24C" },
+  { id: "forest",   label: "Forest",     bg: "#121B17", surface: "#1B2822", surface2: "#23342C", text: "#E6EDE8", muted: "#8CA398", border: "#2B3E35", accent: "#4E9B6E" },
+  { id: "ocean",    label: "Ocean",      bg: "#0E1A22", surface: "#172834", surface2: "#1F3543", text: "#E3EDF2", muted: "#84A0AF", border: "#274050", accent: "#2C9DB4" },
+  { id: "plum",     label: "Plum",       bg: "#19131F", surface: "#241C2C", surface2: "#2E2438", text: "#ECE5EF", muted: "#A091AB", border: "#392E46", accent: "#9C5BC0" },
+  { id: "slate",    label: "Slate",      bg: "#15171B", surface: "#202226", surface2: "#2A2C31", text: "#E6E6E8", muted: "#94979C", border: "#33363B", accent: "#C98A3E" },
+  { id: "paper",    label: "Paper",      bg: "#F3F0E9", surface: "#FFFFFF", surface2: "#EBE6DA", text: "#1F222A", muted: "#6C7178", border: "#D8D2C3", accent: "#1F6F5C" },
+];
+
+function applyTheme(themeId) {
+  const t = THEMES.find((th) => th.id === themeId) || THEMES[0];
+  BG = t.bg; SURFACE = t.surface; SURFACE2 = t.surface2;
+  TEXT = t.text; MUTED = t.muted; BORDER = t.border; ACCENT = t.accent;
+}
 
 const DEFAULT_CATEGORIES = [
   { id: "health", label: "Health", color: "#6FA88A" },
@@ -151,7 +167,8 @@ function migrate(raw) {
   const projects = raw.projects || [];
   const projectItems = raw.projectItems || [];
   const somedayLabel = raw.somedayLabel || "Someday";
-  return { tasks: tasks.map(normalizeTask), dailyLogs, categories, projects, projectItems, somedayLabel };
+  const themeId = raw.themeId || "ink-gold";
+  return { tasks: tasks.map(normalizeTask), dailyLogs, categories, projects, projectItems, somedayLabel, themeId };
 }
 
 function generateIfNeeded(data, key) {
@@ -646,7 +663,22 @@ function CategoryRow({ cat, onEdit }) {
   );
 }
 
-function ManageView({ tasks, categories, somedayLabel, onEditSomedayLabel, onAddClick, onEditClick, onToggleDaily, onToggleDone, onAddCategory, onEditCategory, iosMode, onInstallClick, installMsg, onExport }) {
+function ThemeSwatch({ theme, selected, onSelect }) {
+  return (
+    <button onClick={onSelect} className="flex flex-col items-center gap-1.5">
+      <div style={{
+        width: 46, height: 46, borderRadius: "50%", background: theme.bg,
+        border: selected ? `2px solid ${ACCENT}` : `1px solid ${BORDER}`,
+        display: "flex", alignItems: "center", justifyContent: "center",
+      }}>
+        <div style={{ width: 18, height: 18, borderRadius: "50%", background: theme.accent }} />
+      </div>
+      <span style={{ fontSize: 10, color: selected ? ACCENT : MUTED }}>{theme.label}</span>
+    </button>
+  );
+}
+
+function ManageView({ tasks, categories, somedayLabel, onEditSomedayLabel, onAddClick, onEditClick, onToggleDaily, onToggleDone, onAddCategory, onEditCategory, iosMode, onInstallClick, installMsg, onExport, themeId, onChangeTheme }) {
   const dailyTasks = tasks.filter((t) => t.isDaily);
   const somedayTasks = tasks.filter((t) => !t.isDaily);
   return (
@@ -692,9 +724,14 @@ function ManageView({ tasks, categories, somedayLabel, onEditSomedayLabel, onAdd
       <div className="space-y-2 mb-4">
         {categories.map((cat) => (<CategoryRow key={cat.id} cat={cat} onEdit={() => onEditCategory(cat)} />))}
       </div>
-      <button onClick={onAddCategory} className="w-full py-3 rounded-xl flex items-center justify-center gap-2" style={{ background: SURFACE, border: `1px solid ${BORDER}`, color: TEXT }}>
+      <button onClick={onAddCategory} className="w-full py-3 rounded-xl flex items-center justify-center gap-2 mb-8" style={{ background: SURFACE, border: `1px solid ${BORDER}`, color: TEXT }}>
         + Add category
       </button>
+
+      <div style={{ fontSize: 11, color: MUTED, letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 8 }}>Theme</div>
+      <div className="flex flex-wrap gap-4 mb-4">
+        {THEMES.map((t) => (<ThemeSwatch key={t.id} theme={t} selected={t.id === themeId} onSelect={() => onChangeTheme(t.id)} />))}
+      </div>
 
       <InstallSection iosMode={iosMode} onInstallClick={onInstallClick} message={installMsg} />
       <BackupSection onExport={onExport} />
@@ -1161,7 +1198,7 @@ function App() {
   const [fb, setFb] = useState(null);
   const [authUser, setAuthUser] = useState(undefined);
   const [authError, setAuthError] = useState(null);
-  const [data, setData] = useState({ tasks: [], dailyLogs: {}, categories: DEFAULT_CATEGORIES, projects: [], projectItems: [], somedayLabel: "Someday" });
+  const [data, setData] = useState({ tasks: [], dailyLogs: {}, categories: DEFAULT_CATEGORIES, projects: [], projectItems: [], somedayLabel: "Someday", themeId: "ink-gold" });
   const [loaded, setLoaded] = useState(false);
   const [showSplash, setShowSplash] = useState(true);
   const [syncError, setSyncError] = useState(false);
@@ -1329,7 +1366,7 @@ function App() {
     try { await fb.signInWithPopup(fb.auth, fb.provider); }
     catch (e) { setAuthError("Sign-in failed. Please try again."); console.error(e); }
   };
-  const handleSignOut = () => { fb.signOut(fb.auth); setData({ tasks: [], dailyLogs: {}, categories: DEFAULT_CATEGORIES, projects: [], projectItems: [], somedayLabel: "Someday" }); setLoaded(false); };
+  const handleSignOut = () => { fb.signOut(fb.auth); setData({ tasks: [], dailyLogs: {}, categories: DEFAULT_CATEGORIES, projects: [], projectItems: [], somedayLabel: "Someday", themeId: "ink-gold" }); setLoaded(false); };
   const handleEnableNotifications = () => { Notification.requestPermission().then((p) => setNotifPermission(p)); };
   const handleExport = () => {
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
@@ -1352,6 +1389,7 @@ function App() {
   const openItemSheet = (initial = null) => setItemSheet({ initial });
   const closeItemSheet = () => setItemSheet(null);
   const handleRenameSomeday = (label) => { mutate((prev) => ({ ...prev, somedayLabel: label })); setLabelSheetOpen(false); };
+  const handleChangeTheme = (themeId) => mutate((prev) => ({ ...prev, themeId }));
 
   const handleTapTask = (dk, taskInstanceId) => mutate((prev) => ({
     ...prev,
@@ -1570,6 +1608,8 @@ function App() {
   ];
   const activeProject = allProjects.find((p) => p.id === activeProjectId) || null;
 
+  applyTheme(data.themeId);
+
   return (
     <div className="w-full flex justify-center" style={{ background: "#0B0E13", minHeight: "100vh" }}>
       <div className="w-full flex flex-col overflow-hidden" style={{ maxWidth: 430, height: "100vh", background: BG, color: TEXT, fontFamily: "Inter, sans-serif" }}>
@@ -1615,6 +1655,7 @@ function App() {
                   onAddCategory={() => openCategorySheet(null)} onEditCategory={(cat) => openCategorySheet(cat)}
                   iosMode={isIOS()} onInstallClick={handleInstallClick} installMsg={installMsg}
                   onExport={handleExport}
+                  themeId={data.themeId} onChangeTheme={handleChangeTheme}
                 />
               )}
             </div>
